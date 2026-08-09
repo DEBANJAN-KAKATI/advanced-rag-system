@@ -1,0 +1,8 @@
+# Q3 Financial Performance Report
+
+Revenue for Q3 reached $4.2 million, representing a 24% year-over-year increase driven by strong enterprise subscription growth.
+Operating expenses totaled $2.1 million, resulting in a net profit margin of 50%.
+
+## Key Risk Factors
+Supply chain disruptions in APAC may impact hardware delivery times by 2-3 weeks during Q4.
+Customer retention remains high at 96.5% gross dollar retention.

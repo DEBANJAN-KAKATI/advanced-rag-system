@@ -1,0 +1,25 @@
+# API Keys & Secrets
+api_key_here
+.env
+
+# Build & Release
+build/
+dist/
+*.exe
+*.spec
+
+# Application Data (Vector DB & Uploads)
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.venv/
+
+# OS Files
+.DS_Store
+Thumbs.db
