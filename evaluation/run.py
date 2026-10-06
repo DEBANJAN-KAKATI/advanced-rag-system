@@ -379,6 +379,8 @@ def main(argv=None) -> int:
     parser.add_argument("--no-bm25-cache", action="store_true", help="rebuild BM25 per query (pre-fix behaviour)")
     parser.add_argument("--limit", type=int, help="only the first N questions (smoke test)")
     parser.add_argument("--name", default=None, help="results sub-directory name")
+    parser.add_argument("--resume", action="store_true",
+                        help="keep configurations already saved under --name and run only the rest")
     args = parser.parse_args(argv)
 
     logging.getLogger("rag_system").setLevel(logging.WARNING)
@@ -408,23 +410,14 @@ def main(argv=None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     summaries, all_rows = [], []
-    for c_name in chunk_names:
-        store, chunks, stats = build_index(corpus, CHUNKING_CONFIGS[c_name], embedder)
-        max_recall = round(M.mean([M.max_achievable_recall(it, chunks) for it in items if it.answerable]), 4)
-        print(f"[{c_name}] {stats['n_chunks']} chunks, max achievable recall {max_recall:.3f}")
-        for r_name in runnable:
-            t0 = time.perf_counter()
-            rows = run_retrieval(items, store, chunks, RETRIEVAL_CONFIGS[r_name], style, args.generate,
-                                 judge, c_name, r_name)
-            s = summarize(rows, items, stats, max_recall)
-            summaries.append(s)
-            all_rows.extend(rows)
-            print(f"   {r_name:<28} recall@5={s['metrics']['evidence_recall@5']:.3f} "
-                  f"MRR={s['metrics']['mrr']:.3f} p50={s['latency_ms']['retrieval_p50']:.1f}ms "
-                  f"({time.perf_counter() - t0:.0f}s)")
+    done = set()
+    if args.resume and (out_dir / "summary.json").exists():
+        summaries = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))["runs"]
+        with open(out_dir / "per_query.jsonl", encoding="utf-8") as f:
+            all_rows = [json.loads(line) for line in f if line.strip()]
+        done = {(s["chunking"], s["retrieval"]) for s in summaries}
+        print(f"Resuming: {len(done)} configuration(s) already in {out_dir}")
 
-    calibration = [calibrate(get_judge(j), items, corpus) for j in (args.calibrate_judge or [])]
-    pvals = significance(summaries, all_rows)
     try:
         sha = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
     except OSError:
@@ -440,13 +433,39 @@ def main(argv=None) -> int:
         "retrieval_configs": {r: asdict(RETRIEVAL_CONFIGS[r]) for r in runnable},
         "chunking_configs": {c: CHUNKING_CONFIGS[c] for c in chunk_names},
     }
-    (out_dir / "summary.json").write_text(json.dumps(
-        {"environment": env, "skipped": skipped, "runs": summaries, "judge_calibration": calibration,
-         "p_values_vs_baseline": pvals}, indent=2), encoding="utf-8")
-    with open(out_dir / "per_query.jsonl", "w", encoding="utf-8") as f:
-        for r in all_rows:
-            f.write(json.dumps(r) + "\n")
-    write_markdown(out_dir / "summary.md", env, summaries, skipped, calibration, pvals)
+
+    def save(calibration):
+        """Writes all outputs; called after every chunking config so an interrupted run keeps its work."""
+        pvals = significance(summaries, all_rows)
+        (out_dir / "summary.json").write_text(json.dumps(
+            {"environment": env, "skipped": skipped, "runs": summaries, "judge_calibration": calibration,
+             "p_values_vs_baseline": pvals}, indent=2), encoding="utf-8")
+        with open(out_dir / "per_query.jsonl", "w", encoding="utf-8") as f:
+            for r in all_rows:
+                f.write(json.dumps(r) + "\n")
+        write_markdown(out_dir / "summary.md", env, summaries, skipped, calibration, pvals)
+
+    for c_name in chunk_names:
+        pending = [r for r in runnable if (c_name, r) not in done]
+        if not pending:
+            continue
+        store, chunks, stats = build_index(corpus, CHUNKING_CONFIGS[c_name], embedder)
+        max_recall = round(M.mean([M.max_achievable_recall(it, chunks) for it in items if it.answerable]), 4)
+        print(f"[{c_name}] {stats['n_chunks']} chunks, max achievable recall {max_recall:.3f}", flush=True)
+        for r_name in pending:
+            t0 = time.perf_counter()
+            rows = run_retrieval(items, store, chunks, RETRIEVAL_CONFIGS[r_name], style, args.generate,
+                                 judge, c_name, r_name)
+            s = summarize(rows, items, stats, max_recall)
+            summaries.append(s)
+            all_rows.extend(rows)
+            print(f"   {r_name:<28} recall@5={s['metrics']['evidence_recall@5']:.3f} "
+                  f"MRR={s['metrics']['mrr']:.3f} p50={s['latency_ms']['retrieval_p50']:.1f}ms "
+                  f"({time.perf_counter() - t0:.0f}s)", flush=True)
+        save([])
+
+    calibration = [calibrate(get_judge(j), items, corpus) for j in (args.calibrate_judge or [])]
+    save(calibration)
     print(f"\nWrote {out_dir}/summary.md, summary.json, per_query.jsonl")
     for k, v in skipped.items():
         print(f"Skipped {k}: {v}")
