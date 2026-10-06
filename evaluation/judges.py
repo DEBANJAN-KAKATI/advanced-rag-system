@@ -235,7 +235,8 @@ def calibrate(judge, items: List[QAItem], corpus: Corpus, seed: int = 0) -> Dict
     for item in answerable:
         ev = item.evidence[0]
         context = _context_window(corpus.docs[ev.doc]["raw_text"], ev.text)
-        evidence_answer = " ".join(e.text for e in item.evidence if e.doc == ev.doc)
+        # Newline-joined so separate spans stay separate claims.
+        evidence_answer = "\n".join(e.text for e in item.evidence if e.doc == ev.doc)
         extractive.append(judge.faithfulness(evidence_answer, context)["faithfulness"])
         if item.reference_answer:
             abstractive.append(judge.faithfulness(item.reference_answer, context)["faithfulness"])
