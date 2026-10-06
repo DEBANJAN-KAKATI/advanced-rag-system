@@ -13,6 +13,7 @@
 | chunking | chunks | mean tok | % truncated by embedder | max recall | hit@5 | recall@5 | MRR | nDCG@10 | P@5 | recall@1000tok | recall@2000tok | prompt tok | $/1k q (answer call) | index s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | structure-500 | 244 | 456 | 99.6 | 1.000 | 0.840 | 0.833 | 0.608 | 0.661 | 0.200 | 0.560 | 0.780 | 2838 | 0.387 | 5.8 |
+| structure-250 | 537 | 212 | 25.5 | 1.000 | 0.827 | 0.820 | 0.602 | 0.636 | 0.197 | 0.807 | 0.887 | 1626 | 0.266 | 11.2 |
 
 ## Retrieval and reranking strategies (chunking = `structure-500`)
 
@@ -36,6 +37,20 @@
 | hybrid+mmr | 0.750 | 0.500 | 0.688 | 0.733 |
 | hybrid+sentence-maxsim | 1.000 | 0.889 | 0.812 | 0.911 |
 
+## Grid: mrr
+
+| chunking \ retrieval | dense-only | bm25-only | hybrid-rrf | hybrid+keyword | hybrid+mmr | hybrid+sentence-maxsim |
+|---|---|---|---|---|---|---|
+| structure-500 | 0.542 | 0.579 | 0.608 | 0.679 | 0.543 | 0.754 |
+| structure-250 | 0.629 | 0.500 | 0.602 | 0.686 | 0.622 | 0.660 |
+
+## Grid: evidence_recall@5
+
+| chunking \ retrieval | dense-only | bm25-only | hybrid-rrf | hybrid+keyword | hybrid+mmr | hybrid+sentence-maxsim |
+|---|---|---|---|---|---|---|
+| structure-500 | 0.687 | 0.760 | 0.833 | 0.880 | 0.673 | 0.900 |
+| structure-250 | 0.740 | 0.600 | 0.820 | 0.827 | 0.740 | 0.820 |
+
 ## End-to-end generation
 
 | chunking | retrieval | faithfulness | correctness | ref-token recall | false abstention | abstains on unanswerable | LLM calls/q | in tok | out tok | $/1k q (measured) | p50 ms | p95 ms |
@@ -46,6 +61,12 @@
 | structure-500 | hybrid+keyword | 0.986 | – | 0.422 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 7 | 10 |
 | structure-500 | hybrid+mmr | 0.986 | – | 0.475 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 8 | 12 |
 | structure-500 | hybrid+sentence-maxsim | 0.995 | – | 0.439 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 1635 | 1964 |
+| structure-250 | dense-only | 0.993 | – | 0.543 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 3 | 7 |
+| structure-250 | bm25-only | 0.991 | – | 0.492 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 2 | 2 |
+| structure-250 | hybrid-rrf | 0.988 | – | 0.505 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 5 | 8 |
+| structure-250 | hybrid+keyword | 0.989 | – | 0.545 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 7 | 9 |
+| structure-250 | hybrid+mmr | 0.996 | – | 0.558 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 9 | 13 |
+| structure-250 | hybrid+sentence-maxsim | 0.988 | – | 0.546 | 0.000 | 0.000 | 0.0 | 0 | 0 | 0.000 | 823 | 1064 |
 
 ## Paired bootstrap p-values vs `structure-500 / hybrid-rrf`
 
@@ -56,3 +77,9 @@
 | structure-500 / hybrid+keyword | 0.053 | 0.295 |
 | structure-500 / hybrid+mmr | 0.128 | 0.002 |
 | structure-500 / hybrid+sentence-maxsim | 0.005 | 0.134 |
+| structure-250 / dense-only | 0.725 | 0.111 |
+| structure-250 / bm25-only | 0.036 | 0.000 |
+| structure-250 / hybrid-rrf | 0.898 | 0.787 |
+| structure-250 / hybrid+keyword | 0.081 | 0.887 |
+| structure-250 / hybrid+mmr | 0.817 | 0.111 |
+| structure-250 / hybrid+sentence-maxsim | 0.386 | 0.811 |
