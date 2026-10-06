@@ -1,0 +1,666 @@
+{
+  "environment": {
+    "name": "full-offline",
+    "date": "2026-10-06T15:22:56",
+    "git_sha": "821bff1",
+    "python": "3.13.16",
+    "platform": "Linux-6.18.44-fc-v70-x86_64-with-glibc2.39",
+    "embedder": "all-MiniLM-L6-v2 (onnx)",
+    "llm_model": "gemini-2.0-flash",
+    "embedding_model_for_cost": "gemini-embedding-001",
+    "has_llm_key": false,
+    "n_questions": 81,
+    "n_answerable": 75,
+    "bm25_cache": true,
+    "generate": "answer",
+    "judge": "lexical",
+    "argv": [
+      "--suite",
+      "full",
+      "--generate",
+      "--calibrate-judge",
+      "lexical",
+      "--name",
+      "full-offline"
+    ],
+    "retrieval_configs": {
+      "dense-only": {
+        "use_dense": true,
+        "use_bm25": false,
+        "use_query_rewrite": false,
+        "rerank_strategy": "none",
+        "candidate_k": 15
+      },
+      "bm25-only": {
+        "use_dense": false,
+        "use_bm25": true,
+        "use_query_rewrite": false,
+        "rerank_strategy": "none",
+        "candidate_k": 15
+      },
+      "hybrid-rrf": {
+        "use_dense": true,
+        "use_bm25": true,
+        "use_query_rewrite": false,
+        "rerank_strategy": "none",
+        "candidate_k": 15
+      },
+      "hybrid+keyword": {
+        "use_dense": true,
+        "use_bm25": true,
+        "use_query_rewrite": false,
+        "rerank_strategy": "keyword",
+        "candidate_k": 15
+      },
+      "hybrid+mmr": {
+        "use_dense": true,
+        "use_bm25": true,
+        "use_query_rewrite": false,
+        "rerank_strategy": "mmr",
+        "candidate_k": 15
+      },
+      "hybrid+sentence-maxsim": {
+        "use_dense": true,
+        "use_bm25": true,
+        "use_query_rewrite": false,
+        "rerank_strategy": "sentence-maxsim",
+        "candidate_k": 15
+      }
+    },
+    "chunking_configs": {
+      "structure-500": {
+        "strategy": "structure",
+        "chunk_size": 500,
+        "chunk_overlap": 100
+      },
+      "structure-250": {
+        "strategy": "structure",
+        "chunk_size": 250,
+        "chunk_overlap": 50
+      },
+      "structure-1000": {
+        "strategy": "structure",
+        "chunk_size": 1000,
+        "chunk_overlap": 200
+      },
+      "fixed-250": {
+        "strategy": "fixed",
+        "chunk_size": 250,
+        "chunk_overlap": 50
+      },
+      "fixed-500": {
+        "strategy": "fixed",
+        "chunk_size": 500,
+        "chunk_overlap": 100
+      },
+      "fixed-500-no-overlap": {
+        "strategy": "fixed",
+        "chunk_size": 500,
+        "chunk_overlap": 0
+      },
+      "sentence-250": {
+        "strategy": "sentence",
+        "chunk_size": 250,
+        "chunk_overlap": 50
+      },
+      "sentence-500": {
+        "strategy": "sentence",
+        "chunk_size": 500,
+        "chunk_overlap": 100
+      },
+      "semantic-500": {
+        "strategy": "semantic",
+        "chunk_size": 500,
+        "chunk_overlap": 0
+      }
+    }
+  },
+  "skipped": {
+    "hybrid+cross-encoder": "cross-encoder model unavailable (sentence-transformers not installed or model download blocked); the app would silently fall back to keyword overlap",
+    "hybrid+rewrite+cross-encoder": "query rewriting needs GEMINI_API_KEY"
+  },
+  "runs": [
+    {
+      "chunking": "structure-500",
+      "retrieval": "dense-only",
+      "n_questions": 81,
+      "n_answerable": 75,
+      "chunk_stats": {
+        "n_chunks": 244,
+        "mean_tokens": 455.8,
+        "p95_tokens": 497.9,
+        "max_tokens": 597,
+        "indexed_tokens": 111226,
+        "chunking_seconds": 0.01,
+        "embedding_seconds": 5.75,
+        "chunking_embedding_tokens": 0,
+        "pct_truncated_by_embedder": 99.6,
+        "projected_index_cost_usd": 0.016683899999999998
+      },
+      "max_achievable_recall": 1.0,
+      "metrics": {
+        "hit@1": 0.4267,
+        "evidence_recall@1": 0.4133,
+        "hit@3": 0.6,
+        "evidence_recall@3": 0.5933,
+        "hit@5": 0.6933,
+        "evidence_recall@5": 0.6867,
+        "hit@10": 0.8133,
+        "evidence_recall@10": 0.8067,
+        "precision@5": 0.16,
+        "mrr": 0.5417,
+        "ndcg@10": 0.561,
+        "context_tokens@5": 2276.6533,
+        "recall@500tok": 0.4,
+        "recall@1000tok": 0.5333,
+        "recall@2000tok": 0.6467,
+        "evidence_recall@5_ci95": [
+          0.5867,
+          0.7867
+        ],
+        "mrr_ci95": [
+          0.4446,
+          0.6355
+        ],
+        "hit@5_ci95": [
+          0.5867,
+          0.8
+        ]
+      },
+      "recall@5_by_type": {
+        "cross_doc": 0.75,
+        "lexical": 0.5,
+        "multi_span": 0.5625,
+        "paraphrase": 0.7778
+      },
+      "latency_ms": {
+        "retrieval_p50": 2.86,
+        "retrieval_p95": 3.98,
+        "stages_p50": {
+          "embed_query": 2.72,
+          "fusion": 0.02,
+          "rerank": 0.0,
+          "vector_search": 0.04
+        }
+      },
+      "projected_cost": {
+        "model": "gemini-2.0-flash",
+        "prompt_tokens_mean": 2812.3,
+        "answer_only_usd_per_1k_queries": 0.3841,
+        "full_pipeline_usd_per_1k_queries": 0.4739
+      },
+      "rerank_strategy_used": {
+        "none": 81
+      },
+      "generation": {
+        "faithfulness": 0.9854,
+        "correctness": null,
+        "reference_token_recall": 0.4545,
+        "false_abstention_rate": 0.0,
+        "unanswerable_abstention_rate": 0.0,
+        "end_to_end_ms_p50": 3.1,
+        "end_to_end_ms_p95": 4.1,
+        "llm_calls_per_query": 0.0,
+        "llm_input_tokens_mean": 0.0,
+        "llm_output_tokens_mean": 0.0,
+        "measured_usd_per_1k_queries": 0.0
+      }
+    },
+    {
+      "chunking": "structure-500",
+      "retrieval": "bm25-only",
+      "n_questions": 81,
+      "n_answerable": 75,
+      "chunk_stats": {
+        "n_chunks": 244,
+        "mean_tokens": 455.8,
+        "p95_tokens": 497.9,
+        "max_tokens": 597,
+        "indexed_tokens": 111226,
+        "chunking_seconds": 0.01,
+        "embedding_seconds": 5.75,
+        "chunking_embedding_tokens": 0,
+        "pct_truncated_by_embedder": 99.6,
+        "projected_index_cost_usd": 0.016683899999999998
+      },
+      "max_achievable_recall": 1.0,
+      "metrics": {
+        "hit@1": 0.4533,
+        "evidence_recall@1": 0.44,
+        "hit@3": 0.6533,
+        "evidence_recall@3": 0.64,
+        "hit@5": 0.7733,
+        "evidence_recall@5": 0.76,
+        "hit@10": 0.88,
+        "evidence_recall@10": 0.8667,
+        "precision@5": 0.192,
+        "mrr": 0.5793,
+        "ndcg@10": 0.6291,
+        "context_tokens@5": 2294.68,
+        "recall@500tok": 0.4267,
+        "recall@1000tok": 0.5467,
+        "recall@2000tok": 0.7333,
+        "evidence_recall@5_ci95": [
+          0.6665,
+          0.8468
+        ],
+        "mrr_ci95": [
+          0.4887,
+          0.6764
+        ],
+        "hit@5_ci95": [
+          0.68,
+          0.8667
+        ]
+      },
+      "recall@5_by_type": {
+        "cross_doc": 0.625,
+        "lexical": 0.7778,
+        "multi_span": 0.5625,
+        "paraphrase": 0.8
+      },
+      "latency_ms": {
+        "retrieval_p50": 0.89,
+        "retrieval_p95": 1.36,
+        "stages_p50": {
+          "bm25": 0.85,
+          "fusion": 0.01,
+          "rerank": 0.0
+        }
+      },
+      "projected_cost": {
+        "model": "gemini-2.0-flash",
+        "prompt_tokens_mean": 2829.4,
+        "answer_only_usd_per_1k_queries": 0.3858,
+        "full_pipeline_usd_per_1k_queries": 0.4756
+      },
+      "rerank_strategy_used": {
+        "none": 81
+      },
+      "generation": {
+        "faithfulness": 0.9885,
+        "correctness": null,
+        "reference_token_recall": 0.4364,
+        "false_abstention_rate": 0.0,
+        "unanswerable_abstention_rate": 0.0,
+        "end_to_end_ms_p50": 1.0,
+        "end_to_end_ms_p95": 1.5,
+        "llm_calls_per_query": 0.0,
+        "llm_input_tokens_mean": 0.0,
+        "llm_output_tokens_mean": 0.0,
+        "measured_usd_per_1k_queries": 0.0
+      }
+    },
+    {
+      "chunking": "structure-500",
+      "retrieval": "hybrid-rrf",
+      "n_questions": 81,
+      "n_answerable": 75,
+      "chunk_stats": {
+        "n_chunks": 244,
+        "mean_tokens": 455.8,
+        "p95_tokens": 497.9,
+        "max_tokens": 597,
+        "indexed_tokens": 111226,
+        "chunking_seconds": 0.01,
+        "embedding_seconds": 5.75,
+        "chunking_embedding_tokens": 0,
+        "pct_truncated_by_embedder": 99.6,
+        "projected_index_cost_usd": 0.016683899999999998
+      },
+      "max_achievable_recall": 1.0,
+      "metrics": {
+        "hit@1": 0.4667,
+        "evidence_recall@1": 0.4533,
+        "hit@3": 0.6667,
+        "evidence_recall@3": 0.66,
+        "hit@5": 0.84,
+        "evidence_recall@5": 0.8333,
+        "hit@10": 0.9467,
+        "evidence_recall@10": 0.94,
+        "precision@5": 0.2,
+        "mrr": 0.6077,
+        "ndcg@10": 0.6611,
+        "context_tokens@5": 2303.4933,
+        "recall@500tok": 0.44,
+        "recall@1000tok": 0.56,
+        "recall@2000tok": 0.78,
+        "evidence_recall@5_ci95": [
+          0.7467,
+          0.9133
+        ],
+        "mrr_ci95": [
+          0.5231,
+          0.6951
+        ],
+        "hit@5_ci95": [
+          0.76,
+          0.92
+        ]
+      },
+      "recall@5_by_type": {
+        "cross_doc": 1.0,
+        "lexical": 0.7778,
+        "multi_span": 0.6875,
+        "paraphrase": 0.8667
+      },
+      "latency_ms": {
+        "retrieval_p50": 3.97,
+        "retrieval_p95": 6.54,
+        "stages_p50": {
+          "bm25": 1.03,
+          "embed_query": 2.75,
+          "fusion": 0.02,
+          "rerank": 0.0,
+          "vector_search": 0.05
+        }
+      },
+      "projected_cost": {
+        "model": "gemini-2.0-flash",
+        "prompt_tokens_mean": 2838.2,
+        "answer_only_usd_per_1k_queries": 0.3867,
+        "full_pipeline_usd_per_1k_queries": 0.4765
+      },
+      "rerank_strategy_used": {
+        "none": 81
+      },
+      "generation": {
+        "faithfulness": 0.9874,
+        "correctness": null,
+        "reference_token_recall": 0.4436,
+        "false_abstention_rate": 0.0,
+        "unanswerable_abstention_rate": 0.0,
+        "end_to_end_ms_p50": 4.0,
+        "end_to_end_ms_p95": 6.4,
+        "llm_calls_per_query": 0.0,
+        "llm_input_tokens_mean": 0.0,
+        "llm_output_tokens_mean": 0.0,
+        "measured_usd_per_1k_queries": 0.0
+      }
+    },
+    {
+      "chunking": "structure-500",
+      "retrieval": "hybrid+keyword",
+      "n_questions": 81,
+      "n_answerable": 75,
+      "chunk_stats": {
+        "n_chunks": 244,
+        "mean_tokens": 455.8,
+        "p95_tokens": 497.9,
+        "max_tokens": 597,
+        "indexed_tokens": 111226,
+        "chunking_seconds": 0.01,
+        "embedding_seconds": 5.75,
+        "chunking_embedding_tokens": 0,
+        "pct_truncated_by_embedder": 99.6,
+        "projected_index_cost_usd": 0.016683899999999998
+      },
+      "max_achievable_recall": 1.0,
+      "metrics": {
+        "hit@1": 0.52,
+        "evidence_recall@1": 0.5133,
+        "hit@3": 0.7867,
+        "evidence_recall@3": 0.7733,
+        "hit@5": 0.8933,
+        "evidence_recall@5": 0.88,
+        "hit@10": 0.9733,
+        "evidence_recall@10": 0.9733,
+        "precision@5": 0.2293,
+        "mrr": 0.6787,
+        "ndcg@10": 0.7367,
+        "context_tokens@5": 2323.0667,
+        "recall@500tok": 0.5,
+        "recall@1000tok": 0.7133,
+        "recall@2000tok": 0.8533,
+        "evidence_recall@5_ci95": [
+          0.8067,
+          0.9467
+        ],
+        "mrr_ci95": [
+          0.601,
+          0.7562
+        ],
+        "hit@5_ci95": [
+          0.8267,
+          0.96
+        ]
+      },
+      "recall@5_by_type": {
+        "cross_doc": 0.875,
+        "lexical": 0.8333,
+        "multi_span": 0.8125,
+        "paraphrase": 0.9111
+      },
+      "latency_ms": {
+        "retrieval_p50": 6.79,
+        "retrieval_p95": 9.31,
+        "stages_p50": {
+          "bm25": 1.13,
+          "embed_query": 3.36,
+          "fusion": 0.02,
+          "rerank": 2.03,
+          "vector_search": 0.06
+        }
+      },
+      "projected_cost": {
+        "model": "gemini-2.0-flash",
+        "prompt_tokens_mean": 2858.1,
+        "answer_only_usd_per_1k_queries": 0.3887,
+        "full_pipeline_usd_per_1k_queries": 0.4785
+      },
+      "rerank_strategy_used": {
+        "keyword": 81
+      },
+      "generation": {
+        "faithfulness": 0.9862,
+        "correctness": null,
+        "reference_token_recall": 0.4217,
+        "false_abstention_rate": 0.0,
+        "unanswerable_abstention_rate": 0.0,
+        "end_to_end_ms_p50": 7.4,
+        "end_to_end_ms_p95": 10.1,
+        "llm_calls_per_query": 0.0,
+        "llm_input_tokens_mean": 0.0,
+        "llm_output_tokens_mean": 0.0,
+        "measured_usd_per_1k_queries": 0.0
+      }
+    },
+    {
+      "chunking": "structure-500",
+      "retrieval": "hybrid+mmr",
+      "n_questions": 81,
+      "n_answerable": 75,
+      "chunk_stats": {
+        "n_chunks": 244,
+        "mean_tokens": 455.8,
+        "p95_tokens": 497.9,
+        "max_tokens": 597,
+        "indexed_tokens": 111226,
+        "chunking_seconds": 0.01,
+        "embedding_seconds": 5.75,
+        "chunking_embedding_tokens": 0,
+        "pct_truncated_by_embedder": 99.6,
+        "projected_index_cost_usd": 0.016683899999999998
+      },
+      "max_achievable_recall": 1.0,
+      "metrics": {
+        "hit@1": 0.4267,
+        "evidence_recall@1": 0.4133,
+        "hit@3": 0.6133,
+        "evidence_recall@3": 0.6,
+        "hit@5": 0.68,
+        "evidence_recall@5": 0.6733,
+        "hit@10": 0.7867,
+        "evidence_recall@10": 0.7867,
+        "precision@5": 0.16,
+        "mrr": 0.543,
+        "ndcg@10": 0.5545,
+        "context_tokens@5": 2280.7867,
+        "recall@500tok": 0.4,
+        "recall@1000tok": 0.5467,
+        "recall@2000tok": 0.66,
+        "evidence_recall@5_ci95": [
+          0.56,
+          0.78
+        ],
+        "mrr_ci95": [
+          0.4458,
+          0.6333
+        ],
+        "hit@5_ci95": [
+          0.5733,
+          0.7867
+        ]
+      },
+      "recall@5_by_type": {
+        "cross_doc": 0.75,
+        "lexical": 0.5,
+        "multi_span": 0.6875,
+        "paraphrase": 0.7333
+      },
+      "latency_ms": {
+        "retrieval_p50": 7.65,
+        "retrieval_p95": 12.35,
+        "stages_p50": {
+          "bm25": 1.15,
+          "embed_query": 3.0,
+          "fusion": 0.02,
+          "rerank": 3.32,
+          "vector_search": 0.07
+        }
+      },
+      "projected_cost": {
+        "model": "gemini-2.0-flash",
+        "prompt_tokens_mean": 2818.2,
+        "answer_only_usd_per_1k_queries": 0.3847,
+        "full_pipeline_usd_per_1k_queries": 0.4745
+      },
+      "rerank_strategy_used": {
+        "mmr": 81
+      },
+      "generation": {
+        "faithfulness": 0.9864,
+        "correctness": null,
+        "reference_token_recall": 0.4752,
+        "false_abstention_rate": 0.0,
+        "unanswerable_abstention_rate": 0.0,
+        "end_to_end_ms_p50": 7.8,
+        "end_to_end_ms_p95": 12.1,
+        "llm_calls_per_query": 0.0,
+        "llm_input_tokens_mean": 0.0,
+        "llm_output_tokens_mean": 0.0,
+        "measured_usd_per_1k_queries": 0.0
+      }
+    },
+    {
+      "chunking": "structure-500",
+      "retrieval": "hybrid+sentence-maxsim",
+      "n_questions": 81,
+      "n_answerable": 75,
+      "chunk_stats": {
+        "n_chunks": 244,
+        "mean_tokens": 455.8,
+        "p95_tokens": 497.9,
+        "max_tokens": 597,
+        "indexed_tokens": 111226,
+        "chunking_seconds": 0.01,
+        "embedding_seconds": 5.75,
+        "chunking_embedding_tokens": 0,
+        "pct_truncated_by_embedder": 99.6,
+        "projected_index_cost_usd": 0.016683899999999998
+      },
+      "max_achievable_recall": 1.0,
+      "metrics": {
+        "hit@1": 0.6533,
+        "evidence_recall@1": 0.64,
+        "hit@3": 0.8267,
+        "evidence_recall@3": 0.82,
+        "hit@5": 0.9067,
+        "evidence_recall@5": 0.9,
+        "hit@10": 0.9733,
+        "evidence_recall@10": 0.9667,
+        "precision@5": 0.2373,
+        "mrr": 0.7543,
+        "ndcg@10": 0.7856,
+        "context_tokens@5": 2312.9733,
+        "recall@500tok": 0.64,
+        "recall@1000tok": 0.74,
+        "recall@2000tok": 0.8733,
+        "evidence_recall@5_ci95": [
+          0.8267,
+          0.96
+        ],
+        "mrr_ci95": [
+          0.6722,
+          0.829
+        ],
+        "hit@5_ci95": [
+          0.84,
+          0.96
+        ]
+      },
+      "recall@5_by_type": {
+        "cross_doc": 1.0,
+        "lexical": 0.8889,
+        "multi_span": 0.8125,
+        "paraphrase": 0.9111
+      },
+      "latency_ms": {
+        "retrieval_p50": 1639.64,
+        "retrieval_p95": 1955.26,
+        "stages_p50": {
+          "bm25": 1.2,
+          "embed_query": 3.81,
+          "fusion": 0.03,
+          "rerank": 1632.66,
+          "vector_search": 0.08
+        }
+      },
+      "projected_cost": {
+        "model": "gemini-2.0-flash",
+        "prompt_tokens_mean": 2845.1,
+        "answer_only_usd_per_1k_queries": 0.3874,
+        "full_pipeline_usd_per_1k_queries": 0.4772
+      },
+      "rerank_strategy_used": {
+        "sentence-maxsim": 81
+      },
+      "generation": {
+        "faithfulness": 0.9948,
+        "correctness": null,
+        "reference_token_recall": 0.4387,
+        "false_abstention_rate": 0.0,
+        "unanswerable_abstention_rate": 0.0,
+        "end_to_end_ms_p50": 1634.7,
+        "end_to_end_ms_p95": 1963.9,
+        "llm_calls_per_query": 0.0,
+        "llm_input_tokens_mean": 0.0,
+        "llm_output_tokens_mean": 0.0,
+        "measured_usd_per_1k_queries": 0.0
+      }
+    }
+  ],
+  "judge_calibration": [],
+  "p_values_vs_baseline": {
+    "structure-500 / dense-only": {
+      "mrr": 0.1008,
+      "evidence_recall@5": 0.0008
+    },
+    "structure-500 / bm25-only": {
+      "mrr": 0.4874,
+      "evidence_recall@5": 0.1874
+    },
+    "structure-500 / hybrid+keyword": {
+      "mrr": 0.0534,
+      "evidence_recall@5": 0.295
+    },
+    "structure-500 / hybrid+mmr": {
+      "mrr": 0.1276,
+      "evidence_recall@5": 0.0022
+    },
+    "structure-500 / hybrid+sentence-maxsim": {
+      "mrr": 0.0052,
+      "evidence_recall@5": 0.1338
+    }
+  }
+}
