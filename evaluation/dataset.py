@@ -94,6 +94,7 @@ def load_corpus(corpus_dir: Path = CORPUS_DIR) -> Corpus:
     corpus = Corpus()
     for path in sorted(Path(corpus_dir).glob("*.txt")):
         doc = parse_txt(path)
+        doc["raw_text"] = "\n\n".join(page["text"] for page in doc["pages"])
         doc["doc_id"] = path.stem
         doc["file_type"] = "txt"
         doc["size_bytes"] = path.stat().st_size

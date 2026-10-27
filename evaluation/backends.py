@@ -1,14 +1,13 @@
 """
 Embedding backends for the evaluation harness.
 
-`onnx-minilm` is the same all-MiniLM-L6-v2 model the app uses as its local
-fallback (via sentence-transformers), run through onnxruntime instead: mean
-pooling + L2 normalisation, identical outputs, no PyTorch needed. The ONNX
-export is the one chromadb ships; it is downloaded once into data/models/ and
-verified against chromadb's pinned SHA-256.
+`onnx-minilm` is all-MiniLM-L6-v2 run through onnxruntime (mean pooling + L2
+normalisation, the same outputs as sentence-transformers, no PyTorch needed).
+The ONNX export is the one chromadb ships; it is downloaded once into
+data/models/ and verified against chromadb's pinned SHA-256.
 
 `app` uses whatever the app itself is configured with (Gemini embeddings when a
-key is set, otherwise sentence-transformers).
+key is set, otherwise local sentence-transformers, BAAI/bge-small-en-v1.5 by default).
 """
 import hashlib
 import os
@@ -21,6 +20,7 @@ import numpy as np
 
 from app.core.config import settings
 from app.core.telemetry import record_embedding
+from app.retrieval.embedder import Embedder, create_embedder
 
 MINILM_URL = "https://chroma-onnx-models.s3.amazonaws.com/all-MiniLM-L6-v2/onnx.tar.gz"
 MINILM_SHA256 = "913d7300ceae3b2dbc2c50d1de4baacab4be7b9380491c27fab7418616a16ec3"
@@ -45,10 +45,12 @@ def _ensure_minilm(model_dir: Path) -> Path:
     return onnx_dir
 
 
-class OnnxMiniLMEmbedder:
-    """Drop-in replacement for app.retrieval.embedder.Embedder."""
+class OnnxMiniLMEmbedder(Embedder):
+    """all-MiniLM-L6-v2 via onnxruntime, implementing the app's Embedder interface."""
 
     name = "all-MiniLM-L6-v2 (onnx)"
+    signature = "onnx:all-MiniLM-L6-v2"
+    description = name
     max_length = 256  # sentence-transformers' max_seq_length for this model
 
     def __init__(self, model_dir: Path = MODEL_DIR, batch_size: int = 32):
@@ -65,7 +67,7 @@ class OnnxMiniLMEmbedder:
                                             providers=["CPUExecutionProvider"])
         self.batch_size = batch_size
 
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
+    def embed_documents(self, texts: List[str]) -> np.ndarray:
         if not texts:
             return np.empty((0, 384), dtype=np.float32)
         out = np.zeros((len(texts), 384), dtype=np.float32)
@@ -89,14 +91,16 @@ class OnnxMiniLMEmbedder:
         record_embedding("local-onnx", "all-MiniLM-L6-v2", len(texts), n_tokens, estimated=False)
         return out
 
-    def embed_query(self, query: str) -> np.ndarray:
-        return self.embed_texts([query])
+    def embed_queries(self, texts: List[str]) -> np.ndarray:
+        return self.embed_documents(texts)  # MiniLM uses no query prefix
 
 
 def get_embedder(name: str):
     if name == "onnx-minilm":
         return OnnxMiniLMEmbedder()
     if name == "app":
-        from app.retrieval.embedder import embedder
+        embedder = create_embedder()
+        if embedder is None:
+            raise RuntimeError("The app has no embedding model configured (see EMBEDDING_PROVIDER).")
         return embedder
     raise ValueError(f"Unknown embedder {name!r}; expected 'onnx-minilm' or 'app'")

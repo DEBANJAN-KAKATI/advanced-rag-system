@@ -19,7 +19,8 @@ Two judges share one interface, judge(question, answer, context_chunks, referenc
                 pipeline's.
 
 Both also report abstention: whether the answer declines with the app's
-"insufficient evidence" wording, which is right for unanswerable questions and
+"I couldn't find this in the uploaded documents" wording (or the older
+"insufficient evidence" phrasing), which is right for unanswerable questions and
 wrong otherwise.
 """
 import json
@@ -29,7 +30,8 @@ from typing import Dict, List, Optional, Sequence
 
 from app.core.config import settings
 from app.core.telemetry import record_llm_response, trace
-from app.retrieval.chunker import split_sentences
+from app.generation.citation import is_not_found_answer
+from app.retrieval.chunker import sentence_spans
 from evaluation.dataset import Corpus, QAItem, normalize
 
 ABSTAIN_PATTERNS = re.compile(
@@ -41,13 +43,13 @@ been being it its this that these those there here which who whom whose what whe
 very can could should would may might must shall will do does did done has have had having i you he she we they them
 their our your his her my me us also just only such any all each every some more most other own same both either neither
 one per via etc e g ie""".split())
-_CITATION = re.compile(r"\*?\[(?:Doc|Source)[^\]]*\]\*?", re.I)
+_CITATION = re.compile(r"\*?\[(?:Doc|Source)[^\]]*\]\*?|\[\d{1,3}\]", re.I)
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 _SOURCE_LABEL = re.compile(r"^\S+\.(?:txt|md|pdf|docx?|html?|json|csv|py) \(Page \d+", re.I)
 
 
 def is_abstention(answer: str) -> bool:
-    return bool(ABSTAIN_PATTERNS.search(answer or ""))
+    return is_not_found_answer(answer or "") or bool(ABSTAIN_PATTERNS.search(answer or ""))
 
 
 def _content_words(text: str) -> set:
@@ -61,12 +63,13 @@ def extract_claims(answer: str, min_words: int = 4) -> List[str]:
     claims = []
     for line in text.splitlines():
         line = line.strip()
-        if not line or line.startswith("#") or "⚠️" in line or line.startswith("---"):
+        # ">" lines are the app's notices (e.g. "Extractive answer - the AI model is unavailable").
+        if not line or line.startswith(("#", ">", "---")) or "⚠️" in line:
             continue
         line = re.sub(r"[*_`]+", "", line).lstrip("-• ").strip()
         if (line.endswith(":") and len(line) < 120) or _SOURCE_LABEL.match(line):  # "file.txt (Page 1, ...):"
             continue
-        for _, sentence in split_sentences(line):
+        for _, sentence in sentence_spans(line):
             if len(_content_words(sentence)) >= min_words:
                 claims.append(sentence)
     return claims
@@ -80,7 +83,7 @@ class LexicalJudge:
         self.window = window
 
     def _windows(self, context: str) -> List[set]:
-        sents = [_content_words(s) for _, s in split_sentences(context)]
+        sents = [_content_words(s) for _, s in sentence_spans(context)]
         if not sents:
             return []
         return [set().union(*sents[i:i + self.window]) for i in range(max(1, len(sents) - self.window + 1))]
@@ -228,7 +231,7 @@ def calibrate(judge, items: List[QAItem], corpus: Corpus, seed: int = 0) -> Dict
     rng = random.Random(seed)
     answerable = [i for i in items if i.answerable]
     foreign_pool = {
-        name: [s for _, s in split_sentences(doc["raw_text"]) if len(_content_words(s)) >= 8 and not s.startswith("#")]
+        name: [s for _, s in sentence_spans(doc["raw_text"]) if len(_content_words(s)) >= 8 and not s.startswith("#")]
         for name, doc in corpus.docs.items()
     }
     extractive, abstractive, injected_hits, swap_hits = [], [], [], []

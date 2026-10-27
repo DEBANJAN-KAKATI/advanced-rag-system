@@ -1,42 +1,45 @@
-import os
+import socket
 import sys
 import threading
+import time
 import webbrowser
 import uvicorn
-import socket
-import time
+from app.core.config import settings
 from app.utils.logging import logger
 
-def get_free_port(start_port=8000, max_port=8100):
-    for port in range(start_port, max_port):
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(('', port))
-                return port
-        except OSError:
-            continue
-    raise RuntimeError("Could not find a free port.")
 
-def open_browser(port):
-    # Wait a bit before opening to ensure server is up
-    # Add a timestamp to bypass browser caching for index.html
-    url = f"http://localhost:{port}?t={int(time.time())}"
-    webbrowser.open(url)
+def get_free_port(host: str, start_port: int, attempts: int = 100) -> int:
+    for port in range(start_port, start_port + attempts):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind((host, port))
+                return port
+            except OSError:
+                continue
+    raise RuntimeError(f"Could not find a free port starting at {start_port}.")
+
+
+def open_browser(url: str):
+    # Timestamp bypasses browser caching of index.html
+    webbrowser.open(f"{url}?t={int(time.time())}")
+
 
 if __name__ == "__main__":
     try:
-        port = get_free_port()
+        port = get_free_port(settings.HOST, settings.PORT)
     except RuntimeError as e:
         logger.error(str(e))
         sys.exit(1)
 
+    browse_host = "localhost" if settings.HOST in ("0.0.0.0", "127.0.0.1", "::") else settings.HOST
+    url = f"http://{browse_host}:{port}"
     logger.info("==========================================================")
-    logger.info(f"Launching jstRAG System live on http://localhost:{port}")
+    logger.info(f"Launching jstRAG on {url}")
     logger.info("==========================================================")
-    
-    # We use a timer to open the browser after 2 seconds
-    threading.Timer(2.0, open_browser, args=[port]).start()
-    
-    # Do not use reload=True as it does not work well with PyInstaller executables
+
+    if settings.OPEN_BROWSER:
+        threading.Timer(2.0, open_browser, args=[url]).start()
+
+    # reload=True does not work with PyInstaller executables
     from app.main import app
-    uvicorn.run(app, host="0.0.0.0", port=port, reload=False)
+    uvicorn.run(app, host=settings.HOST, port=port, reload=False)

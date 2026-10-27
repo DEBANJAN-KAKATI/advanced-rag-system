@@ -18,31 +18,33 @@ pip install -r requirements.txt -r evaluation/requirements.txt
 python -m evaluation.validate_dataset          # every evidence span exists verbatim in the corpus
 python -m pytest tests                          # unit tests (no model download, no API key)
 
-# Full offline grid: 9 chunking x 6 retrieval configs (~15 min on 4 CPUs)
+# Full offline grid: 10 chunking x 7 runnable retrieval configs (~40 min on 4 CPUs)
 python -m evaluation.run --suite full --generate --calibrate-judge lexical --name my-run
 cat evaluation/results/my-run/summary.md
 ```
 
-The first run downloads the ONNX build of `all-MiniLM-L6-v2` (~80 MB) into `data/models/`. This is the same model the app uses as its local embedding fallback, and the download is checked against a pinned SHA-256. Nothing the harness does touches the app's persisted index in `data/vectorstore/`.
+The first run downloads the ONNX build of `all-MiniLM-L6-v2` (~80 MB) into `data/models/`, checked against a pinned SHA-256. It is a small local model that needs no PyTorch; the app's own local default is `BAAI/bge-small-en-v1.5`, so pass `--embedder app` to evaluate whatever the app is configured with. Nothing the harness does touches the app's persisted index in `data/vectorstore/` (it uses in-memory stores).
+
+Chunking configs are named in approximate tokens (`structure-300` = 300 tokens); the harness converts them to the chunker's character units (x4). `structure-300` matches the app default (`CHUNK_SIZE=1200`, `CHUNK_OVERLAP=200` characters) and is the baseline for significance tests.
 
 ### With Gemini (measured cost, LLM-judged faithfulness)
 
-Put a key in `api_key_here` (or set `GEMINI_API_KEY`), then:
+Set `GEMINI_API_KEY` in `.env` (or use the legacy `api_key_here` file), then:
 
 ```bash
 # Measured end-to-end tokens, dollars and latency for the app's real generate_answer()
-python -m evaluation.run --chunking structure-500 sentence-250 --retrieval hybrid-rrf hybrid+keyword \
+python -m evaluation.run --chunking structure-300 sentence-250 --retrieval hybrid-rrf hybrid+keyword \
     --generate --judge llm --name gemini-e2e
 
 # The app's full default pipeline (query rewriting + cross-encoder). Needs sentence-transformers
 # and access to huggingface.co for the cross-encoder model.
-python -m evaluation.run --retrieval hybrid+rewrite+cross-encoder --chunking structure-500 --generate --judge llm
+python -m evaluation.run --retrieval hybrid+rewrite+cross-encoder --chunking structure-300 --generate --judge llm
 
 # How far to trust each judge: score answers whose faithfulness is known
 python -m evaluation.run --suite none --calibrate-judge lexical llm --name judge-cal
 ```
 
-`--embedder app` uses the app's configured embedder (Gemini when a key is set) instead of local MiniLM.
+`--embedder app` uses the app's configured embedder (Gemini when a key is set, else local `bge-small-en-v1.5`) instead of MiniLM. `--generate` uses the app's configured LLM (Gemini or an OpenAI-compatible server); without one, it scores the app's extractive fallback answers.
 
 ## Files
 

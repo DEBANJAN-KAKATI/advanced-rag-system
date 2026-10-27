@@ -11,10 +11,9 @@ import numpy as np
 import pytest
 
 from app.core import telemetry
-from app.core.config import settings
 from app.core.pricing import cost_usd
 from app.retrieval.chunker import CHUNK_STRATEGIES, chunk_document
-from app.retrieval.reranker import Reranker
+from app.retrieval.embedder import Embedder
 from app.retrieval.retriever import RetrievalConfig, retrieve_relevant_chunks
 from app.retrieval.vectorstore import VectorStore
 from evaluation import metrics as M
@@ -22,11 +21,13 @@ from evaluation.dataset import Evidence, QAItem, chunk_covers, load_corpus, load
 from evaluation.judges import LexicalJudge, LLMJudge, extract_claims
 
 
-class HashEmbedder:
+class HashEmbedder(Embedder):
     """Bag-of-words hashing embedder: similar texts get similar vectors."""
     name = "hash"
+    signature = "test:hash:256"
+    description = "hash"
 
-    def embed_texts(self, texts):
+    def embed_documents(self, texts):
         out = np.zeros((len(texts), 256), dtype=np.float32)
         for i, t in enumerate(texts):
             for w in re.findall(r"\w+", t.lower()):
@@ -35,8 +36,8 @@ class HashEmbedder:
         norms[norms == 0] = 1
         return out / norms
 
-    def embed_query(self, q):
-        return self.embed_texts([q])
+    def embed_queries(self, texts):
+        return self.embed_documents(texts)
 
 
 @pytest.fixture(scope="module")
@@ -51,7 +52,14 @@ def pep257(corpus):
 
 @pytest.fixture
 def no_llm(monkeypatch):
-    monkeypatch.setattr(settings, "GEMINI_API_KEY", "your_api_key")
+    import app.generation.llm as llm_module
+    import app.retrieval.query_rewriter as rewriter
+    monkeypatch.setattr(llm_module, "llm", None)
+    monkeypatch.setattr(rewriter, "llm", None)
+
+
+# Sizes below are characters (the chunker's unit); the harness converts its token-named configs.
+SIZE, OVERLAP = 600, 120
 
 
 def test_golden_dataset_spans_exist_verbatim(corpus):
@@ -63,8 +71,8 @@ def test_golden_dataset_spans_exist_verbatim(corpus):
 
 @pytest.mark.parametrize("strategy", CHUNK_STRATEGIES)
 def test_chunkers_keep_all_content(strategy, pep257):
-    chunks = chunk_document(pep257, strategy=strategy, chunk_size=150, chunk_overlap=30,
-                            embed_fn=HashEmbedder().embed_texts)
+    chunks = chunk_document(pep257, strategy=strategy, chunk_size=SIZE, chunk_overlap=OVERLAP,
+                            embed_fn=HashEmbedder().embed_documents)
     assert len(chunks) > 3
     assert len({c["chunk_id"] for c in chunks}) == len(chunks)
     doc_words = set(re.findall(r"\w+", pep257["raw_text"]))
@@ -74,19 +82,19 @@ def test_chunkers_keep_all_content(strategy, pep257):
 
 def test_fixed_and_sentence_chunks_respect_size(pep257):
     for strategy in ("fixed", "sentence"):
-        chunks = chunk_document(pep257, strategy=strategy, chunk_size=150, chunk_overlap=30)
+        chunks = chunk_document(pep257, strategy=strategy, chunk_size=SIZE, chunk_overlap=OVERLAP)
         longest_sentence = 600  # a single sentence may exceed the target on its own
-        assert max(len(c["text"]) for c in chunks) <= 150 * 4 + longest_sentence
+        assert max(len(c["text"]) for c in chunks) <= SIZE + longest_sentence
 
 
 def test_structure_overlap_zero_does_not_duplicate(pep257):
-    chunks = chunk_document(pep257, strategy="structure", chunk_size=150, chunk_overlap=0)
+    chunks = chunk_document(pep257, strategy="structure", chunk_size=SIZE, chunk_overlap=0)
     total = sum(len(c["text"]) for c in chunks)
     assert total < len(pep257["raw_text"]) * 1.05
 
 
 def test_chunk_sections_follow_headings(pep257):
-    chunks = chunk_document(pep257, strategy="sentence", chunk_size=150, chunk_overlap=0)
+    chunks = chunk_document(pep257, strategy="sentence", chunk_size=SIZE, chunk_overlap=0)
     trim = [c for c in chunks if "def trim(docstring)" in c["text"]]
     assert trim and trim[0]["section"] == "Handling Docstring Indentation"
 
@@ -151,6 +159,19 @@ def test_claim_extraction_skips_markup_and_offline_notes():
     assert extract_claims(answer) == ["Limit all lines to a maximum of 79 characters ."]
 
 
+def test_claim_extraction_handles_numbered_citations_and_notices():
+    answer = ("> **Extractive answer** - the AI model is unavailable (no LLM is configured). Below are the "
+              "most relevant sentences.\n\n- Limit all lines to a maximum of 79 characters [1][2].")
+    assert extract_claims(answer) == ["Limit all lines to a maximum of 79 characters ."]
+
+
+def test_abstention_recognises_app_wording():
+    from evaluation.judges import is_abstention
+    assert is_abstention("I couldn't find this in the uploaded documents. They cover X.")
+    assert is_abstention("Based on the provided documents, there is insufficient evidence.")
+    assert not is_abstention("Limit all lines to 79 characters [1].")
+
+
 class _FakeResponse:
     def __init__(self, text):
         self.text = text
@@ -195,7 +216,7 @@ def test_telemetry_costs_and_nesting():
 def small_store(corpus):
     store = VectorStore(embedder=HashEmbedder(), persist=False)
     for name in ("pep-0257-docstring-conventions.txt", "pep-0405-virtual-environments.txt"):
-        store.add_chunks(chunk_document(corpus.docs[name], strategy="sentence", chunk_size=150, chunk_overlap=30))
+        store.add_chunks(chunk_document(corpus.docs[name], strategy="sentence", chunk_size=SIZE, chunk_overlap=OVERLAP))
     return store
 
 
@@ -203,9 +224,11 @@ def small_store(corpus):
 def test_rerank_strategies_return_topk_and_record_strategy(strategy, small_store):
     cfg = RetrievalConfig(use_query_rewrite=False, rerank_strategy=strategy)
     with telemetry.trace() as t:
-        results, queries = retrieve_relevant_chunks("What does the --clear option do when creating a venv?",
-                                                    top_k=5, store=small_store, config=cfg)
-    assert queries == ["What does the --clear option do when creating a venv?"]
+        result = retrieve_relevant_chunks("What does the --clear option do when creating a venv?",
+                                          top_k=5, store=small_store, config=cfg)
+    results = result.chunks
+    assert result.queries == ["What does the --clear option do when creating a venv?"]
+    assert result.scorer == strategy
     assert len(results) == 5 and len({c["chunk_id"] for c, _ in results}) == 5
     assert t.annotations["rerank_strategy_used"] == strategy
     assert {"embed_query", "bm25", "fusion", "rerank"} <= set(t.stages)
@@ -222,22 +245,24 @@ def test_cross_encoder_fallback_is_visible(small_store, monkeypatch):
 def test_dense_only_and_bm25_only(small_store):
     for cfg in (RetrievalConfig(use_bm25=False, use_query_rewrite=False, rerank_strategy="none"),
                 RetrievalConfig(use_dense=False, use_query_rewrite=False, rerank_strategy="none")):
-        results, _ = retrieve_relevant_chunks("pyvenv.cfg home key", top_k=3, store=small_store, config=cfg)
-        assert results
+        assert retrieve_relevant_chunks("pyvenv.cfg home key", top_k=3, store=small_store, config=cfg).chunks
     with pytest.raises(ValueError):
         retrieve_relevant_chunks("q", store=small_store, config=RetrievalConfig(use_dense=False, use_bm25=False))
 
 
 def test_bm25_cache_gives_identical_results(small_store):
-    chunks = small_store.get_all_chunks()
-    cached, uncached = Reranker(), Reranker()
-    uncached.cache_bm25 = False
-    for q in ("virtual environment isolation", "docstring indentation"):
-        assert cached.bm25_search(q, chunks) == uncached.bm25_search(q, chunks)
+    queries = ("virtual environment isolation", "docstring indentation")
+    cached = [small_store.keyword_search(q, top_k=10) for q in queries]
+    small_store.cache_bm25 = False
+    try:
+        uncached = [small_store.keyword_search(q, top_k=10) for q in queries]
+    finally:
+        small_store.cache_bm25 = True
+    assert cached == uncached and all(cached)
 
 
 def test_in_memory_store_does_not_touch_disk(tmp_path, corpus):
-    store = VectorStore(embedder=HashEmbedder(), persist=False, save_dir=tmp_path)
+    store = VectorStore(store_dir=tmp_path, embedder=HashEmbedder(), persist=False)
     store.add_chunks(chunk_document(corpus.docs["pep-0257-docstring-conventions.txt"]))
     assert list(tmp_path.iterdir()) == []
     ids = [c["chunk_id"] for c in store.get_all_chunks()[:2]]
@@ -252,3 +277,10 @@ def test_generate_answer_reports_usage_offline(small_store, no_llm):
     assert resp.usage["estimated_cost_usd"] == 0.0
     assert "retrieval" in resp.usage["stages_ms"]
     assert all(s["chunk_id"] for s in resp.sources_used)
+
+
+def test_lexical_judge_calibration_runs(corpus):
+    from evaluation.judges import calibrate
+    result = calibrate(LexicalJudge(), load_dataset()[:8], corpus)
+    assert result["judge"] == "lexical"
+    assert result["faithful_extractive_score"] > 0.9

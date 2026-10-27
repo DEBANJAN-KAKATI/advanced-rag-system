@@ -1,5 +1,12 @@
 # Chunking and reranking: evaluation report
 
+> [!NOTE]
+> The numbers below were measured on the pipeline as it was before the retrieval refactor
+> (merged together with this harness). Since then the default chunk size is ~300 tokens
+> (`CHUNK_SIZE=1200` characters, in line with recommendation 1), BM25 has its own cached
+> index, and reranker fallbacks are reported. A re-run on the current pipeline is in
+> progress and will be added to this report.
+
 **TL;DR**
 
 - **Chunk smaller.** 250-token chunks retrieve as well as the current 500-token default at top-5 (0.820 vs 0.833 evidence recall, not a significant difference). With the context budget held fixed they are much better: 0.807 vs 0.560 recall within 1,000 tokens. That budget difference is significant (p < 0.001). They also cut the answer prompt by 43% (1,626 vs 2,838 tokens) and the projected cost by 31%.

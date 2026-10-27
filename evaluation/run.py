@@ -39,10 +39,12 @@ from app.core.config import settings
 from app.core.pricing import cost_usd, estimate_tokens
 from app.core.schemas import AnswerStyle
 from app.core.telemetry import trace
-from app.generation.prompts import SYSTEM_RAG_PROMPT_TEMPLATE, STYLE_INSTRUCTIONS
+from app.generation import llm as llm_module
+from app.generation.answerer import format_context_passages
+from app.generation.prompts import ANSWER_PROMPT_TEMPLATE, FOLLOWUP_INSTRUCTION, STYLE_INSTRUCTIONS, SYSTEM_PROMPT
 from app.retrieval import reranker as reranker_module
 from app.retrieval.chunker import chunk_document
-from app.retrieval.retriever import RetrievalConfig, retrieve_relevant_chunks
+from app.retrieval.retriever import RetrievalConfig, retrieve_relevant_chunks, top_k_for_style
 from app.retrieval.vectorstore import VectorStore
 from evaluation import metrics as M
 from evaluation.backends import get_embedder
@@ -51,9 +53,12 @@ from evaluation.judges import calibrate, get_judge
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
-# chunk_size / chunk_overlap are in approximate tokens (x4 = characters), like CHUNK_SIZE.
+# chunk_size / chunk_overlap are in approximate tokens; build_index converts them to the
+# chunker's characters (x4). The app default is CHUNK_SIZE=1200 / CHUNK_OVERLAP=200 characters.
+CHARS_PER_TOKEN = 4
 CHUNKING_CONFIGS: Dict[str, dict] = {
-    "structure-500": dict(strategy="structure", chunk_size=500, chunk_overlap=100),  # app default
+    "structure-300": dict(strategy="structure", chunk_size=300, chunk_overlap=50),  # app default
+    "structure-500": dict(strategy="structure", chunk_size=500, chunk_overlap=100),  # previous default
     "structure-250": dict(strategy="structure", chunk_size=250, chunk_overlap=50),
     "structure-1000": dict(strategy="structure", chunk_size=1000, chunk_overlap=200),
     "fixed-250": dict(strategy="fixed", chunk_size=250, chunk_overlap=50),
@@ -78,59 +83,63 @@ RETRIEVAL_CONFIGS: Dict[str, RetrievalConfig] = {
 
 SUITES = {
     "chunking": (list(CHUNKING_CONFIGS), ["hybrid-rrf"]),
-    "reranking": (["structure-500"], list(RETRIEVAL_CONFIGS)),
+    "reranking": (["structure-300"], list(RETRIEVAL_CONFIGS)),
     "full": (list(CHUNKING_CONFIGS), list(RETRIEVAL_CONFIGS)),
     "none": ([], []),
 }
 
-BASELINE = ("structure-500", "hybrid-rrf")
-EVAL_TOP_K = 10  # rank depth scored; the app passes the top settings.RERANK_TOP_K (5) to the LLM
+BASELINE = ("structure-300", "hybrid-rrf")
+EVAL_TOP_K = 10  # rank depth scored; the app passes the top top_k_for_style(style) passages to the LLM
 
 # Assumptions used only to *project* per-query cost when no LLM was called.
 # Measured usage from a --generate run replaces them.
 PROJECTED_OUTPUT_TOKENS = {AnswerStyle.CONCISE: 100, AnswerStyle.MEDIUM: 250, AnswerStyle.LONG: 900}
-PROJECTED_REWRITE_TOKENS = (110, 40)    # (input, output) for the query-rewrite call
-PROJECTED_FOLLOWUP_TOKENS = (330, 60)   # (input, output) for the follow-up-questions call
+PROJECTED_REWRITE_TOKENS = (250, 40)    # (input, output) for the query-rewrite call
+PROJECTED_FOLLOWUP_OUTPUT_TOKENS = 60   # follow-ups are generated in the answer call itself
 
 
 def available(retrieval_name: str) -> (bool, str):
     rc = RETRIEVAL_CONFIGS[retrieval_name]
-    if rc.use_query_rewrite and not settings.has_llm_key:
-        return False, "query rewriting needs GEMINI_API_KEY"
+    if rc.use_query_rewrite and llm_module.llm is None:
+        return False, "query rewriting needs an LLM (GEMINI_API_KEY or an OpenAI-compatible server)"
     if rc.rerank_strategy == "cross-encoder" and reranker_module.reranker._get_cross_encoder() is None:
         return False, ("cross-encoder model unavailable (sentence-transformers not installed or "
-                       "model download blocked); the app would silently fall back to keyword overlap")
+                       "model download blocked); the app would fall back to keyword reranking, reported "
+                       "as rerank_strategy_used and in /api/status")
     return True, ""
 
 
 def projected_cost(question: str, chunks: List[dict], style: AnswerStyle, full_pipeline: bool) -> Dict:
     """Cost of the LLM + embedding calls the app *would* make for this query with Gemini."""
-    context = "\n\n".join(f"[Source {i+1}] File: {c['filename']} | Page: {c.get('page', 1)} | "
-                          f"Section: {c.get('section', 'General')}\nContent:\n{c['text']}"
-                          for i, c in enumerate(chunks))
-    prompt = SYSTEM_RAG_PROMPT_TEMPLATE.format(style_instruction=STYLE_INSTRUCTIONS[style], chat_history="",
-                                               context_passages=context, question=question)
+    prompt = SYSTEM_PROMPT + ANSWER_PROMPT_TEMPLATE.format(
+        chat_history="", context_passages=format_context_passages(chunks),
+        style_instruction=STYLE_INSTRUCTIONS[style], question=question,
+        followup_instruction=FOLLOWUP_INSTRUCTION if full_pipeline else "")
     in_tok, out_tok = estimate_tokens(prompt), PROJECTED_OUTPUT_TOKENS[style]
     n_query_embeddings = 1
     if full_pipeline:
-        n_query_embeddings = 3
-        in_tok += PROJECTED_REWRITE_TOKENS[0] + PROJECTED_FOLLOWUP_TOKENS[0]
-        out_tok += PROJECTED_REWRITE_TOKENS[1] + PROJECTED_FOLLOWUP_TOKENS[1]
+        n_query_embeddings = 3  # standalone question + up to 2 rewrites, embedded in one call
+        in_tok += PROJECTED_REWRITE_TOKENS[0]
+        out_tok += PROJECTED_REWRITE_TOKENS[1] + PROJECTED_FOLLOWUP_OUTPUT_TOKENS
     llm = cost_usd(settings.LLM_MODEL, in_tok, out_tok) or 0.0
     emb = cost_usd(settings.EMBEDDING_MODEL, n_query_embeddings * estimate_tokens(question)) or 0.0
     return {"prompt_tokens": estimate_tokens(prompt), "input_tokens": in_tok, "output_tokens": out_tok,
             "cost_usd": llm + emb}
 
 
-def build_index(corpus, chunk_cfg: dict, embedder):
+def build_index(corpus, chunk_cfg: dict, embedder, cache_bm25: bool = True):
     t0 = time.perf_counter()
     with trace() as chunk_trace:
         chunks = []
         for doc in corpus.docs.values():
-            chunks.extend(chunk_document(doc, embed_fn=embedder.embed_texts, **chunk_cfg))
+            chunks.extend(chunk_document(
+                doc, strategy=chunk_cfg["strategy"], embed_fn=embedder.embed_documents,
+                chunk_size=chunk_cfg["chunk_size"] * CHARS_PER_TOKEN,
+                chunk_overlap=chunk_cfg["chunk_overlap"] * CHARS_PER_TOKEN))
     chunk_s = time.perf_counter() - t0
     t1 = time.perf_counter()
     store = VectorStore(embedder=embedder, persist=False)
+    store.cache_bm25 = cache_bm25
     store.add_chunks(chunks)
     embed_s = time.perf_counter() - t1
 
@@ -163,8 +172,10 @@ def run_retrieval(items, store, chunks, rc: RetrievalConfig, style, generate, ju
                        for it in items if it.answerable}
     for item in items:
         with trace() as t:
-            scored, expansions = retrieve_relevant_chunks(item.question, top_k=EVAL_TOP_K, store=store, config=rc)
+            result = retrieve_relevant_chunks(item.question, top_k=EVAL_TOP_K, store=store, config=rc)
+        scored = result.chunks
         ranked = [c for c, _ in scored]
+        n_llm = top_k_for_style(style)
         usage = t.summary()
         row = {
             "chunking": chunk_name, "retrieval": ret_name, "id": item.id, "type": item.type,
@@ -172,8 +183,9 @@ def run_retrieval(items, store, chunks, rc: RetrievalConfig, style, generate, ju
             "rerank_strategy_used": usage["annotations"].get("rerank_strategy_used"),
             "top_chunks": [c["chunk_id"] for c in ranked[:5]],
             "top_score": float(scored[0][1]) if scored else None,
-            "projected": projected_cost(item.question, ranked[:settings.RERANK_TOP_K], style, full_pipeline=False),
-            "projected_full": projected_cost(item.question, ranked[:settings.RERANK_TOP_K], style, full_pipeline=True),
+            "mode": result.mode,
+            "projected": projected_cost(item.question, ranked[:n_llm], style, full_pipeline=False),
+            "projected_full": projected_cost(item.question, ranked[:n_llm], style, full_pipeline=True),
         }
         if item.answerable:
             row["metrics"] = M.retrieval_metrics(item, ranked, relevant_counts[item.id])
@@ -275,7 +287,7 @@ def write_markdown(path: Path, env, summaries, skipped, calibration, pvals):
          f"- Date: {env['date']}  |  git: `{env['git_sha']}`  |  embedder: {env['embedder']}  |  "
          f"LLM for cost projection: {env['llm_model']}",
          f"- Questions: {env['n_questions']} ({env['n_answerable']} answerable)  |  retrieval depth scored: "
-         f"top-{EVAL_TOP_K}  |  chunks sent to LLM: top-{settings.RERANK_TOP_K}", ""]
+         f"top-{EVAL_TOP_K}  |  chunks sent to LLM: top-{env['llm_top_k']}", ""]
     if skipped:
         L += ["**Skipped configurations**", ""] + [f"- `{k}`: {v}" for k, v in skipped.items()] + [""]
 
@@ -390,8 +402,6 @@ def main(argv=None) -> int:
     if problems:
         print("Dataset problems:\n  " + "\n  ".join(problems))
         return 1
-    if args.no_bm25_cache:
-        reranker_module.reranker.cache_bm25 = False
 
     chunk_names, ret_names = SUITES[args.suite]
     chunk_names = args.chunking or chunk_names
@@ -426,6 +436,7 @@ def main(argv=None) -> int:
         "name": name, "date": dt.datetime.now().isoformat(timespec="seconds"), "git_sha": sha,
         "python": platform.python_version(), "platform": platform.platform(),
         "embedder": getattr(embedder, "name", args.embedder), "llm_model": settings.LLM_MODEL,
+        "llm_top_k": top_k_for_style(style), "chars_per_token": CHARS_PER_TOKEN,
         "embedding_model_for_cost": settings.EMBEDDING_MODEL, "has_llm_key": settings.has_llm_key,
         "n_questions": len(items), "n_answerable": sum(i.answerable for i in items),
         "bm25_cache": not args.no_bm25_cache, "generate": args.generate, "judge": args.judge if args.generate else None,
@@ -449,7 +460,8 @@ def main(argv=None) -> int:
         pending = [r for r in runnable if (c_name, r) not in done]
         if not pending:
             continue
-        store, chunks, stats = build_index(corpus, CHUNKING_CONFIGS[c_name], embedder)
+        store, chunks, stats = build_index(corpus, CHUNKING_CONFIGS[c_name], embedder,
+                                           cache_bm25=not args.no_bm25_cache)
         max_recall = round(M.mean([M.max_achievable_recall(it, chunks) for it in items if it.answerable]), 4)
         print(f"[{c_name}] {stats['n_chunks']} chunks, max achievable recall {max_recall:.3f}", flush=True)
         for r_name in pending:

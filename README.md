@@ -1,182 +1,420 @@
-#  Advanced RAG System
+<div align="center">
 
-A production-grade, multi-format **Retrieval-Augmented Generation (RAG)** application built in **Python** with **FastAPI** and a modern web interface.  
-This system is designed to help users deeply understand documents by asking questions over uploaded files and receiving grounded, well-structured answers.
+# 📚 jstRAG — Advanced RAG System
 
-It supports:
-- **PDF**
-- **DOC / DOCX**
-- **HTML**
-- **TXT**
-- other readable text-based files
+**Chat with your documents. Get grounded answers with clickable citations.**
 
-It also provides **answer length control**:
-- **Concise**
-- **Medium**
-- **Detailed**
+Hybrid search · Cross-encoder reranking · Streaming answers · Gemini, OpenAI or fully local models
 
-With advanced retrieval, strong grounding, fallback handling, and a polished UI, this project goes far beyond a basic document chatbot.
+[![Python](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![FAISS](https://img.shields.io/badge/Vector%20Search-FAISS-0467DF)](https://github.com/facebookresearch/faiss)
+[![Gemini](https://img.shields.io/badge/LLM-Gemini%20%7C%20OpenAI%20%7C%20Ollama-8E75B2?logo=googlegemini&logoColor=white)](#-choosing-a-model)
+[![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white)](#-testing)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#-contributing)
 
----
+[Features](#-features) · [Quick Start](#-quick-start) · [How It Works](#-how-it-works) · [Configuration](#%EF%B8%8F-configuration) · [API](#-api-reference)
 
-##  Key Highlights
+<img src="docs/screenshot.png" alt="jstRAG answering a question with inline citations and follow-up suggestions" width="900">
 
-- Multi-format document ingestion
-- Intelligent PDF extraction with OCR fallback
-- Hybrid retrieval using semantic + keyword search
-- Query rewriting for better search quality
-- Reranking for more accurate context selection
-- Gemini-powered answer generation
-- Citation-aware responses
-- Concise / Medium / Detailed answer modes
-- Conversation memory for follow-up questions
-- Clickable AI-generated follow-up suggestions
-- Offline fallback when API limits are reached
-- Evaluation harness: retrieval accuracy, faithfulness, and cost/latency per query ([report](docs/EVALUATION_REPORT.md))
-- Beautiful interactive web dashboard
+</div>
 
 ---
 
-##  What This System Does
+## 📖 Table of Contents
 
-This application allows you to upload documents and ask natural language questions about them.
-
-Example questions:
-- “Summarize this report.”
-- “What does the document say about pricing?”
-- “Explain the methodology in detail.”
-- “Give me a concise answer.”
-- “What are the main conclusions?”
-
-The system reads the content, retrieves the most relevant sections, and generates an answer grounded in the uploaded files.
-
----
-
-##  How to Run It
-
-You have two ways to run the application:
-
-### Option 1: Running the Executable (Windows)
-If you just want to run the app without installing Python or any dependencies:
-1. Double-click the `jstRAG.exe` file in the root folder.
-2. A command prompt window will open showing the server starting.
-3. Open your web browser and go to `http://localhost:8000`.
-
-### Option 2: Running from Source
-If you want to run it via Python:
-1. Ensure you have Python 3.9+ installed.
-2. Open a terminal in the project directory.
-3. Install dependencies (optional if already installed): `pip install -r requirements.txt`
-4. Run the server: `python run.py`
-5. Open your web browser and go to `http://localhost:8000`.
+- [Overview](#-overview)
+- [Features](#-features)
+- [Quick Start](#-quick-start)
+- [Choosing a Model](#-choosing-a-model)
+- [How It Works](#-how-it-works)
+- [Configuration](#%EF%B8%8F-configuration)
+- [API Reference](#-api-reference)
+- [Project Structure](#%EF%B8%8F-project-structure)
+- [Evaluation](#-evaluation)
+- [Testing](#-testing)
+- [Troubleshooting](#%EF%B8%8F-troubleshooting)
+- [Contributing](#-contributing)
+- [License](#-license)
 
 ---
 
-##  Where to Place the API Key
+## 🔍 Overview
 
-This system uses Google's Gemini AI to generate answers. You need to provide an API key.
+**jstRAG** is a self-hosted Retrieval-Augmented Generation (RAG) application. Upload PDFs, Word documents, web pages, or notes, then ask questions in natural language. Every answer is built **only** from your documents and cites its sources with numbered markers like `[1]`. Click a marker to see the exact passage it came from.
 
-1. Open the file named `api_key_here` located in the root of the project directory.
-2. Paste your Gemini API key directly into this file, just below the comment line.
-3. Save the file.
-*(Note: Do not use quotes or add extra spaces. The system will automatically read it and ignore comments or blank lines).*
+It is built to keep working when things go wrong:
 
----
-
-## What Happens When Your Quota is Finished?
-
-Google's free-tier Gemini API has strict daily and per-minute rate limits. Because this advanced RAG system makes multiple calls per question (for query rewriting, embeddings, and answer generation), it is easy to exhaust the free quota.
-
-**Here is how the system intelligently handles rate limits:**
-
-1. **Automatic Retries:** If you hit a per-minute limit, the system detects the "Resource Exhausted" error, reads exactly how long it needs to wait, pauses gracefully, and retries your request up to 3 times in the background.
-2. **Offline Fallback Mode:** If your daily quota is fully exhausted, the system **will not break or throw an ugly error**. Instead, it seamlessly switches to an "Offline Fallback" mode.
-
-### How It Answers in Offline Fallback Mode
-When the API is unreachable, the system relies strictly on its local search capabilities to give you the raw context directly from your documents. 
-
-The fallback answer respects your selected style:
-- **Concise:** Shows the single most relevant passage (the first 2-3 sentences only) and its page number.
-- **Medium:** Shows the top 2-3 relevant passages (around 5 sentences each) with their respective filenames and page numbers.
-- **Detailed:** Dumps **all** relevant text chunks found across your documents, fully untruncated, and neatly grouped by Document Name and Page Number.
-
-You will also see a warning note at the bottom of the answer: *"⚠️ Offline mode — Gemini API unavailable. Showing direct document extract."* Once your quota resets (usually at midnight), the system automatically resumes generating AI-synthesized answers.
+| Situation | What happens |
+|---|---|
+| ✅ LLM configured | Streaming, AI-written answers with citations and follow-up suggestions |
+| ⚠️ API quota exhausted / invalid key | An extractive answer from the most relevant sentences, **with the reason shown** |
+| 🔌 No LLM at all | Still useful: cited extractive answers |
+| 🧩 No embedding model | Falls back to BM25 keyword search |
+| ❓ Question not covered by the documents | *"I couldn't find this in the uploaded documents."* No guessing. |
 
 ---
 
-##  Smart Follow-up Questions
+## ✨ Features
 
-After every answer, the system generates **4 clickable suggestion chips** at the bottom of the chat bubble. 
-- **Online Mode:** Gemini AI analyzes the answer and predicts what you might want to ask next (e.g., asking for an example, a comparison, or advanced concepts).
-- **Offline Mode:** The system uses the internal metadata of the retrieved documents (like section headings) to suggest relevant follow-up questions.
+<table>
+<tr>
+<td width="50%" valign="top">
 
-Clicking any of these chips will instantly send it as your next question!
+### 📥 Ingestion
+- **PDF** (with OCR fallback for scanned pages), **DOCX**, **HTML**, **TXT / Markdown / RST**, **CSV**, **JSON**, **Python**
+- Tables and headings kept in reading order
+- Duplicate detection by **content hash**
+- Re-uploading a file with the same name **replaces** the old version
+- Upload size limits and safe file handling
+
+</td>
+<td width="50%" valign="top">
+
+### 🔎 Retrieval
+- **Structure-aware chunking** with section paths and page ranges
+- **Hybrid search**: FAISS vectors + BM25, merged with Reciprocal Rank Fusion
+- **Cross-encoder reranking** with a relevance threshold
+- **Conversation-aware** query rewriting for follow-up questions
+- **Whole-document summaries** that sample the entire file
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### 💬 Answers
+- **Streaming** responses (Server-Sent Events)
+- Inline **`[n]` citations** linked to the exact passage
+- **Concise / Medium / Detailed** styles
+- Confidence labels derived from reranker relevance
+- AI-generated **follow-up questions**
+- Prompt-injection guard for document content
+
+</td>
+<td width="50%" valign="top">
+
+### 🖥️ Interface & Ops
+- Clean web UI, no build step, works **offline**
+- Scope questions to selected documents
+- Stop, New chat, Copy answer
+- Status endpoint showing active components
+- Per-query **latency, token and cost** reporting
+- **Evaluation harness** for retrieval accuracy and faithfulness
+- Pluggable LLMs: **Gemini**, **OpenAI**, **Ollama**, LM Studio, vLLM
+- Offline **pytest** suite
+
+</td>
+</tr>
+</table>
 
 ---
 
-##  Evaluation
+## 🚀 Quick Start
 
-The `evaluation/` package measures the pipeline on a labelled question set built from public-domain Python PEPs:
+### Prerequisites
+
+- Python **3.9+**
+- *(Optional)* A [Gemini API key](https://aistudio.google.com/apikey), an OpenAI key, or a local [Ollama](https://ollama.com/) install
+
+### Installation
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/DEBANJAN-KAKATI/advanced-rag-system.git
+cd advanced-rag-system
+
+# 2. Create a virtual environment (recommended)
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+
+# 3. Install dependencies
+pip install -r requirements.txt
+
+# 4. Configure (optional; every setting has a sensible default)
+cp .env.example .env               # then set GEMINI_API_KEY=...
+
+# 5. Run
+python run.py
+```
+
+The app opens automatically at **http://localhost:8000**. Drop a document into the sidebar and start asking questions.
+
+> [!TIP]
+> For a much smaller install on machines without a GPU, install the CPU build of PyTorch first:
+> `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+
+---
+
+## 🤖 Choosing a Model
+
+| Setup | `.env` settings | Notes |
+|---|---|---|
+| **Gemini** *(default)* | `GEMINI_API_KEY=your-key` | Free tier available. Uses `gemini-flash-latest` for answers and `gemini-embedding-001` for embeddings. |
+| **Fully local (Ollama)** | `LLM_PROVIDER=openai`<br>`OPENAI_BASE_URL=http://localhost:11434/v1`<br>`LLM_MODEL=llama3.1` | No API key, no quota, nothing leaves your machine. Embeddings and reranking run locally. |
+| **OpenAI** | `LLM_PROVIDER=openai`<br>`OPENAI_API_KEY=sk-...`<br>`LLM_MODEL=gpt-4o-mini` | Any OpenAI-compatible server works the same way. |
+| **No LLM** | *(nothing)* | Cited, extractive answers built from the most relevant sentences. |
+
+> [!NOTE]
+> Changing the embedding model is safe: the index detects the change and re-embeds your documents automatically on the next start.
+
+---
+
+## 🧠 How It Works
+
+### Ingestion pipeline
+
+```mermaid
+flowchart LR
+    A[📄 Upload] --> B{Duplicate?<br/>content hash}
+    B -- yes --> X[Skip]
+    B -- no --> C[Parse<br/>PDF · DOCX · HTML · TXT · CSV]
+    C --> D[Clean text<br/>+ OCR fallback]
+    D --> E[Structure-aware<br/>chunking]
+    E --> F[Embed chunks<br/>batched]
+    F --> G[(FAISS index)]
+    E --> H[(BM25 index)]
+```
+
+### Question-answering pipeline
+
+```mermaid
+flowchart LR
+    Q[❓ Question] --> R[Rewrite with<br/>conversation history]
+    R --> V[Vector search]
+    R --> K[BM25 search]
+    V --> F[Reciprocal<br/>Rank Fusion]
+    K --> F
+    F --> RR[Cross-encoder<br/>rerank + threshold]
+    RR --> P[Numbered sources<br/>1..n]
+    P --> L[LLM · streaming]
+    L --> A[✅ Answer with<br/>clickable citations]
+```
+
+1. **Query rewriting**: the question and recent conversation become a standalone query plus up to two alternative phrasings, so *"and what about Q4?"* searches for the right thing.
+2. **Hybrid retrieval**: all queries are embedded in a single call and searched in FAISS, BM25 runs in parallel, and the ranked lists are merged with RRF.
+3. **Reranking**: a cross-encoder scores each candidate from 0 to 1 and passages below `MIN_RELEVANCE_SCORE` are dropped.
+4. **Grounded generation**: the top passages are numbered and the model must cite them. Document text is treated as untrusted data. Follow-up suggestions come from the same LLM call.
+5. **Post-processing**: invalid citation numbers are removed, only the cited sources are listed, and confidence is computed from relevance scores.
+
+---
+
+## ⚙️ Configuration
+
+All settings are read from environment variables or a `.env` file. See [`.env.example`](.env.example) for the complete, commented list.
+
+<details>
+<summary><b>Most useful settings</b></summary>
+
+| Variable | Default | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | — | Enables Gemini for answers and embeddings |
+| `LLM_PROVIDER` | `auto` | `auto`, `gemini`, `openai`, or `none` |
+| `LLM_MODEL` | `gemini-flash-latest` | Model name for the chosen provider |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint (e.g. Ollama) |
+| `EMBEDDING_PROVIDER` | `auto` | `auto`, `gemini`, `local`, or `none` |
+| `LOCAL_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | sentence-transformers model for local embeddings |
+| `CHUNK_STRATEGY` | `structure` | `structure`, `fixed`, `sentence`, or `semantic` |
+| `RERANK_STRATEGY` | `cross-encoder` | `cross-encoder`, `keyword`, `none`, `mmr`, or `sentence-maxsim` |
+| `MIN_RELEVANCE_SCORE` | `0.02` | Passages scoring below this are treated as unrelated |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `200` | Chunk size and overlap, in characters |
+| `TOP_K_CONCISE` / `MEDIUM` / `LONG` | `4` / `6` / `10` | Passages given to the LLM per answer style |
+| `QUERY_REWRITE` | `true` | Generate alternative search queries |
+| `SUGGEST_FOLLOWUPS` | `true` | Suggest follow-up questions |
+| `MAX_UPLOAD_MB` | `50` | Per-file upload limit |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Server address |
+| `RAG_DATA_DIR` | `./data` | Where uploads and the index are stored |
+
+</details>
+
+> [!NOTE]
+> The legacy `api_key_here` file (Gemini key on its first non-comment line) is still supported when `GEMINI_API_KEY` is not set.
+
+---
+
+## 📡 API Reference
+
+Interactive OpenAPI docs are served at **http://localhost:8000/docs**.
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/upload` | Upload one or more files (multipart field `files`). Per-file status: `indexed`, `duplicate`, `replaced`, `error` |
+| `GET` | `/api/documents` | List indexed documents |
+| `GET` | `/api/documents/{doc_id}` | A document's extracted text and chunks |
+| `DELETE` | `/api/documents/{doc_id}` | Remove a document and its vectors |
+| `POST` | `/api/chat` | Ask a question, full JSON response |
+| `POST` | `/api/chat/stream` | Ask a question, streamed as Server-Sent Events |
+| `DELETE` | `/api/conversations/{id}` | Forget a conversation's history |
+| `GET` | `/api/status` | Active LLM, embeddings, reranker, and warnings |
+| `GET` | `/api/health` | Liveness check |
+
+<details>
+<summary><b>Example: ask a question</b></summary>
+
+```bash
+curl -X POST http://localhost:8000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+        "question": "What was the Q3 revenue?",
+        "style": "concise",
+        "document_ids": null,
+        "conversation_id": null
+      }'
+```
+
+```json
+{
+  "answer": "Q3 revenue reached $4.2 million, a 24% year-over-year increase [1].",
+  "confidence": "High",
+  "citations": [
+    { "number": 1, "filename": "sample_report.txt", "page": 1,
+      "section": "Q3 Financial Performance Report", "score": 0.97, "text": "..." }
+  ],
+  "suggested_questions": ["What drove subscription growth?", "..."],
+  "conversation_id": "a1b2c3d4e5f6",
+  "llm_used": true,
+  "usage": {
+    "total_ms": 1840.2,
+    "stages_ms": { "query_rewrite": 412.7, "embed_query": 95.1, "bm25": 0.9, "rerank": 31.4, "generation": 1290.6 },
+    "llm_calls": 2, "llm_input_tokens": 2310, "llm_output_tokens": 164,
+    "estimated_cost_usd": 0.00031
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><b>Streaming events (<code>/api/chat/stream</code>)</b></summary>
+
+| Event | Payload |
+|---|---|
+| `sources` | Retrieved passages, numbered like the `[n]` markers in the answer |
+| `token` | `{ "text": "..." }`: answer text as it is generated |
+| `done` | The final response (same shape as `/api/chat`) |
+| `error` | `{ "message": "..." }` |
+
+</details>
+
+---
+
+## 🗂️ Project Structure
+
+```text
+advanced-rag-system/
+├── app/
+│   ├── main.py                 # FastAPI app, static UI, background index build
+│   ├── api/                    # upload · documents · chat (JSON + SSE) · status
+│   ├── core/                   # settings (.env) and Pydantic schemas
+│   ├── ingestion/              # PDF, DOCX, HTML, TXT/CSV/JSON parsers, OCR, cleaning
+│   ├── retrieval/
+│   │   ├── chunker.py          # structure-aware chunking
+│   │   ├── embedder.py         # Gemini / local sentence-transformers embeddings
+│   │   ├── keyword.py          # BM25 inverted index
+│   │   ├── vectorstore.py      # FAISS index, document registry, persistence
+│   │   ├── query_rewriter.py   # standalone question + query expansion
+│   │   ├── reranker.py         # RRF + cross-encoder / heuristic reranking
+│   │   └── retriever.py        # hybrid retrieval pipeline
+│   ├── generation/
+│   │   ├── llm.py              # Gemini + OpenAI-compatible clients, retries
+│   │   ├── prompts.py          # system prompt and answer styles
+│   │   ├── answerer.py         # streaming RAG pipeline, extractive fallback
+│   │   ├── citation.py         # citation parsing and confidence
+│   │   └── memory.py           # bounded conversation memory
+│   └── utils/
+├── web/                        # UI (vendored marked + DOMPurify, works offline)
+├── evaluation/                 # evaluation harness: corpus, golden Q&A set, metrics, judges
+├── tests/                      # offline pytest suite
+├── docs/                       # evaluation report and README assets
+├── .env.example
+├── requirements.txt
+└── run.py                      # entry point
+```
+
+---
+
+## 📊 Evaluation
+
+The [`evaluation/`](evaluation/README.md) harness measures the pipeline on a labelled question set built from public-domain Python PEPs (81 questions, verbatim evidence spans):
 
 - **Retrieval accuracy**: hit@k, evidence recall@k, MRR, nDCG, and recall within a fixed token budget
-- **Faithfulness**: share of answer claims supported by the retrieved sources (offline lexical judge, or Gemini as judge), plus abstention on unanswerable questions
+- **Faithfulness**: share of answer claims supported by the retrieved sources (offline lexical judge, or an LLM judge), plus abstention on unanswerable questions
 - **Cost and speed per query**: per-stage latency and token usage, priced in dollars
 
 ```bash
+pip install -r evaluation/requirements.txt
 python -m evaluation.run --suite full --generate --calibrate-judge lexical
 ```
 
-Every `/api/chat` response now includes a `usage` object with per-stage latency (ms), LLM and embedding token counts, and estimated cost. Chunking and reranking strategies can be switched with `CHUNK_STRATEGY` (`structure`, `fixed`, `sentence`, `semantic`) and `RERANK_STRATEGY` (`cross-encoder`, `keyword`, `none`, `mmr`, `sentence-maxsim`); `ENABLE_QUERY_REWRITE=false` turns off the extra LLM call.
-
-Results and recommendations: [docs/EVALUATION_REPORT.md](docs/EVALUATION_REPORT.md). Harness usage: [evaluation/README.md](evaluation/README.md).
+Every chat response includes a `usage` object with this per-query telemetry. Findings and recommendations are in the [evaluation report](docs/EVALUATION_REPORT.md).
 
 ---
 
-##  Project Structure
+## 🧪 Testing
 
-```text
-RAG/
-├── api_key_here
-├── jstRAG.exe
-├── jstRAG.spec
-├── requirements.txt
-├── run.py
-├── sample_report.txt
-├── test_rag.py
-├── app/
-│   ├── main.py
-│   ├── api/
-│   │   ├── chat.py
-│   │   ├── documents.py
-│   │   └── upload.py
-│   ├── core/
-│   │   ├── config.py
-│   │   └── schemas.py
-│   ├── generation/
-│   │   ├── answerer.py
-│   │   ├── citation.py
-│   │   ├── memory.py
-│   │   └── prompts.py
-│   ├── ingestion/
-│   │   ├── cleaner.py
-│   │   ├── docx.py
-│   │   ├── html.py
-│   │   ├── loader.py
-│   │   ├── ocr.py
-│   │   ├── pdf.py
-│   │   └── txt.py
-│   ├── retrieval/
-│   │   ├── chunker.py
-│   │   ├── embedder.py
-│   │   ├── query_rewriter.py
-│   │   ├── reranker.py
-│   │   ├── retriever.py
-│   │   └── vectorstore.py
-│   └── utils/
-│       ├── filetypes.py
-│       └── logging.py
-└── web/
-    ├── app.js
-    ├── index.html
-    └── style.css
+```bash
+pip install -r requirements-dev.txt
+pytest
 ```
+
+The suite runs **fully offline**. It uses a deterministic fake embedder and a fake LLM against a temporary data directory, so it never touches your real knowledge base or any API quota.
+
+---
+
+## 🛠️ Troubleshooting
+
+<details>
+<summary><b>Answers say "Extractive answer — the AI model is unavailable"</b></summary>
+
+The reason is shown in the message. Common causes:
+- **API quota or rate limit exceeded**: wait for the quota to reset, or switch to a local model via Ollama.
+- **API key was rejected**: check `GEMINI_API_KEY` in `.env`.
+- **Model not found**: check `LLM_MODEL`.
+
+Open `http://localhost:8000/api/status` to see which components are active.
+</details>
+
+<details>
+<summary><b>A yellow banner says "using keyword search only"</b></summary>
+
+No embedding model is available. Either set `GEMINI_API_KEY` or install `sentence-transformers` (`pip install sentence-transformers`).
+</details>
+
+<details>
+<summary><b>"No readable text could be extracted" for a PDF</b></summary>
+
+The PDF is probably scanned. Install [Tesseract OCR](https://github.com/tesseract-ocr/tesseract) and `pip install pytesseract`, then upload it again.
+</details>
+
+<details>
+<summary><b>Building a Windows executable</b></summary>
+
+`run.py` supports PyInstaller. Bundle the `web/` folder as data (for example, `--add-data "web;web"`) and place `.env` next to the executable.
+</details>
+
+---
+
+## 🤝 Contributing
+
+Contributions are welcome!
+
+1. Fork the repository and create a feature branch: `git checkout -b feature/my-improvement`
+2. Make your changes and add tests where it makes sense
+3. Run `pytest` and make sure everything passes
+4. Open a pull request describing what changed and why
+
+Found a bug or have an idea? Please [open an issue](https://github.com/DEBANJAN-KAKATI/advanced-rag-system/issues).
+
+---
+
+## 📄 License
+
+No license has been chosen for this project yet. Until a `LICENSE` file is added, all rights are reserved by the author.
+
+---
+
+<div align="center">
+
+⭐ If you find this project useful, consider giving it a star!
+
+</div>

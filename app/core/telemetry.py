@@ -3,8 +3,9 @@ Per-query tracing of latency, token usage and cost.
 
 Pipeline code calls `stage()`, `record_llm_call()` and `record_embedding()`
 unconditionally; they are no-ops unless a trace is active. A trace is opened
-with `with trace() as t:` around one query (the chat endpoint does this, and so
-does the evaluation harness), and `t.summary()` gives the numbers.
+with `with trace() as t:` around one query (the evaluation harness does this),
+or activated step by step with `use_trace(t)` (the streaming answer pipeline),
+and `t.summary()` gives the numbers.
 """
 import time
 from collections import defaultdict
@@ -69,6 +70,21 @@ def trace() -> Iterator[QueryTrace]:
         yield t
     finally:
         t.finish()
+        _current.reset(token)
+
+
+@contextmanager
+def use_trace(t: Optional[QueryTrace]) -> Iterator[Optional[QueryTrace]]:
+    """
+    Makes `t` the active trace for one synchronous block. Generators that yield
+    between steps (streaming answers) must use this around each step instead of
+    holding `trace()` open across a yield: a streaming response may advance the
+    generator in a different thread/context each time.
+    """
+    token = _current.set(t)
+    try:
+        yield t
+    finally:
         _current.reset(token)
 
 
