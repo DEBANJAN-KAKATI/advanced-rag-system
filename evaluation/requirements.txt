@@ -1,0 +1,3 @@
+onnxruntime>=1.17.0
+tokenizers>=0.15.0
+pytest>=8.0.0

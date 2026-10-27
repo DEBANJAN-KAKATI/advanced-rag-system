@@ -6,7 +6,8 @@ from typing import List, Dict, Any, Optional
 from collections import OrderedDict
 from app.core.config import settings
 from app.core.schemas import AnswerStyle, ChatResponse, Citation
-from app.retrieval.retriever import retrieve_relevant_chunks
+from app.core.telemetry import record_llm_response, stage, trace
+from app.retrieval.retriever import RetrievalConfig, retrieve_relevant_chunks
 from app.generation.memory import chat_memory
 from app.generation.prompts import SYSTEM_RAG_PROMPT_TEMPLATE, STYLE_INSTRUCTIONS, FOLLOWUP_QUESTIONS_PROMPT
 from app.generation.citation import build_citations, evaluate_confidence
@@ -31,7 +32,7 @@ def _parse_retry_delay(error_message: str) -> float:
     return BASE_RETRY_DELAY
 
 
-def _call_gemini_with_retry(client, model: str, contents: str) -> str:
+def _call_gemini_with_retry(client, model: str, contents: str, purpose: str = "answer") -> str:
     """Call Gemini API with automatic retry on rate-limit (429) errors."""
     last_error = None
     for attempt in range(MAX_RETRIES + 1):
@@ -40,7 +41,9 @@ def _call_gemini_with_retry(client, model: str, contents: str) -> str:
                 model=model,
                 contents=contents
             )
-            return response.text.strip()
+            text = response.text.strip()
+            record_llm_response(purpose, model, response, contents, text)
+            return text
         except Exception as e:
             last_error = e
             error_str = str(e)
@@ -68,7 +71,7 @@ def _generate_followup_questions(client, question: str, answer_text: str) -> Lis
             question=question,
             answer_snippet=answer_snippet
         )
-        raw = _call_gemini_with_retry(client, settings.LLM_MODEL, prompt)
+        raw = _call_gemini_with_retry(client, settings.LLM_MODEL, prompt, purpose="followups")
         if not raw:
             return []
         # Clean markdown fences if present
@@ -220,20 +223,39 @@ def generate_answer(
     question: str,
     style: AnswerStyle = AnswerStyle.MEDIUM,
     document_ids: Optional[List[str]] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
+    store=None,
+    retrieval_config: Optional[RetrievalConfig] = None,
+    generate_followups: bool = True,
 ) -> ChatResponse:
     """
     Executes complete RAG answer generation pipeline.
+
+    The response's `usage` field reports per-stage latency, LLM/embedding token
+    counts and estimated cost for this query. `store` and `retrieval_config`
+    override the global index and retrieval settings (used by evaluation).
     """
+    with trace() as query_trace:
+        response = _generate_answer(question, style, document_ids, conversation_id,
+                                    store, retrieval_config, generate_followups)
+    response.usage = query_trace.summary()
+    return response
+
+
+def _generate_answer(question, style, document_ids, conversation_id,
+                     store, retrieval_config, generate_followups) -> ChatResponse:
     if not conversation_id:
         conversation_id = str(uuid.uuid4())[:8]
 
     # 1. Retrieve chunks
-    scored_chunks, query_expansions = retrieve_relevant_chunks(
-        question=question,
-        top_k=settings.RERANK_TOP_K,
-        doc_filter=document_ids
-    )
+    with stage("retrieval"):
+        scored_chunks, query_expansions = retrieve_relevant_chunks(
+            question=question,
+            top_k=settings.RERANK_TOP_K,
+            doc_filter=document_ids,
+            store=store,
+            config=retrieval_config,
+        )
 
     chunks = [c for c, _ in scored_chunks]
     context_text = format_context_passages(chunks)
@@ -253,12 +275,12 @@ def generate_answer(
     answer_text = ""
     gemini_available = False
     client = None
-    if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY != "your_api_key":
-        if GENAI_AVAILABLE:
-            client = genai.Client(api_key=settings.GEMINI_API_KEY)
+    if settings.has_llm_key and GENAI_AVAILABLE:
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        with stage("generation"):
             answer_text = _call_gemini_with_retry(client, settings.LLM_MODEL, full_prompt)
-            if answer_text:
-                gemini_available = True
+        if answer_text:
+            gemini_available = True
 
     if not answer_text:
         # Offline fallback: style-aware document compilation
@@ -269,11 +291,12 @@ def generate_answer(
 
     # 4. Generate follow-up questions
     suggested_questions = []
-    if gemini_available and client:
-        suggested_questions = _generate_followup_questions(client, question, answer_text)
+    if generate_followups and gemini_available and client:
+        with stage("followups"):
+            suggested_questions = _generate_followup_questions(client, question, answer_text)
     
     # If Gemini failed or returned nothing, use offline follow-ups
-    if not suggested_questions and chunks:
+    if generate_followups and not suggested_questions and chunks:
         suggested_questions = _generate_offline_followups(question, chunks)
 
     # 5. Build Citations & Evaluate Confidence
@@ -285,6 +308,7 @@ def generate_answer(
 
     sources_used = [
         {
+            "chunk_id": c.get("chunk_id"),
             "doc_id": c.get("doc_id"),
             "filename": c.get("filename"),
             "page": c.get("page"),

@@ -32,6 +32,7 @@ With advanced retrieval, strong grounding, fallback handling, and a polished UI,
 - Conversation memory for follow-up questions
 - Clickable AI-generated follow-up suggestions
 - Offline fallback when API limits are reached
+- Evaluation harness: retrieval accuracy, faithfulness, and cost/latency per query ([report](docs/EVALUATION_REPORT.md))
 - Beautiful interactive web dashboard
 
 ---
@@ -110,6 +111,24 @@ After every answer, the system generates **4 clickable suggestion chips** at the
 - **Offline Mode:** The system uses the internal metadata of the retrieved documents (like section headings) to suggest relevant follow-up questions.
 
 Clicking any of these chips will instantly send it as your next question!
+
+---
+
+##  Evaluation
+
+The `evaluation/` package measures the pipeline on a labelled question set built from public-domain Python PEPs:
+
+- **Retrieval accuracy**: hit@k, evidence recall@k, MRR, nDCG, and recall within a fixed token budget
+- **Faithfulness**: share of answer claims supported by the retrieved sources (offline lexical judge, or Gemini as judge), plus abstention on unanswerable questions
+- **Cost and speed per query**: per-stage latency and token usage, priced in dollars
+
+```bash
+python -m evaluation.run --suite full --generate --calibrate-judge lexical
+```
+
+Every `/api/chat` response now includes a `usage` object with per-stage latency (ms), LLM and embedding token counts, and estimated cost. Chunking and reranking strategies can be switched with `CHUNK_STRATEGY` (`structure`, `fixed`, `sentence`, `semantic`) and `RERANK_STRATEGY` (`cross-encoder`, `keyword`, `none`, `mmr`, `sentence-maxsim`); `ENABLE_QUERY_REWRITE=false` turns off the extra LLM call.
+
+Results and recommendations: [docs/EVALUATION_REPORT.md](docs/EVALUATION_REPORT.md). Harness usage: [evaluation/README.md](evaluation/README.md).
 
 ---
 

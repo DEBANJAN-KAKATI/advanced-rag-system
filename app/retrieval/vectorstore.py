@@ -5,19 +5,27 @@ import faiss
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from app.core.config import settings
-from app.retrieval.embedder import embedder
+from app.core.telemetry import stage
+from app.retrieval.embedder import embedder as default_embedder
 from app.utils.logging import logger
 
 class VectorStore:
-    def __init__(self):
-        self.save_dir = settings.VECTOR_STORE_DIR
+    def __init__(self, embedder=None, persist: bool = True, save_dir: Path = None):
+        """
+        persist=False gives an in-memory store that never touches disk, which the
+        evaluation harness uses so experiments don't overwrite the user's index.
+        """
+        self.embedder = embedder or default_embedder
+        self.persist = persist
+        self.save_dir = save_dir or settings.VECTOR_STORE_DIR
         self.index_path = self.save_dir / "faiss.index"
         self.meta_path = self.save_dir / "metadata.json"
         
         self.index = None
         self.metadata: List[Dict[str, Any]] = []
         self.dimension = None
-        self._load()
+        if self.persist:
+            self._load()
 
     def _load(self):
         """Loads FAISS index and metadata if exists."""
@@ -35,7 +43,7 @@ class VectorStore:
 
     def _save(self):
         """Persists index and metadata to disk."""
-        if self.index is not None:
+        if self.persist and self.index is not None:
             faiss.write_index(self.index, str(self.index_path))
             with open(self.meta_path, 'w', encoding='utf-8') as f:
                 json.dump(self.metadata, f, indent=2, ensure_ascii=False)
@@ -46,7 +54,7 @@ class VectorStore:
             return
             
         texts = [c["text"] for c in chunks]
-        embeddings = embedder.embed_texts(texts)
+        embeddings = self.embedder.embed_texts(texts)
         
         if embeddings.shape[0] == 0:
             return
@@ -69,11 +77,13 @@ class VectorStore:
         if self.index is None or self.index.ntotal == 0:
             return []
             
-        query_vec = embedder.embed_query(query)
+        with stage("embed_query"):
+            query_vec = self.embedder.embed_query(query)
         # Search extra candidates if doc_filter is specified
         fetch_k = min(top_k * 4 if doc_filter else top_k, self.index.ntotal)
         
-        scores, indices = self.index.search(query_vec, fetch_k)
+        with stage("vector_search"):
+            scores, indices = self.index.search(query_vec, fetch_k)
         
         results = []
         for score, idx in zip(scores[0], indices[0]):
@@ -118,7 +128,7 @@ class VectorStore:
         # Re-embed remaining chunks to guarantee clean index state
         logger.info(f"Re-indexing after deleting doc_id {doc_id}...")
         texts = [c["text"] for c in keep_metadata]
-        embeddings = embedder.embed_texts(texts)
+        embeddings = self.embedder.embed_texts(texts)
         
         dim = embeddings.shape[1]
         self.index = faiss.IndexFlatIP(dim)
@@ -129,6 +139,11 @@ class VectorStore:
 
     def get_all_chunks(self) -> List[Dict[str, Any]]:
         return self.metadata
+
+    def get_vectors(self, chunk_ids: List[str]) -> np.ndarray:
+        """Returns the stored (normalized) vectors for the given chunk IDs."""
+        row_by_id = {c["chunk_id"]: i for i, c in enumerate(self.metadata)}
+        return np.vstack([self.index.reconstruct(row_by_id[cid]) for cid in chunk_ids])
 
     def get_document_chunks(self, doc_id: str) -> List[Dict[str, Any]]:
         return [c for c in self.metadata if c.get("doc_id") == doc_id]

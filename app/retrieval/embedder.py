@@ -1,6 +1,8 @@
 import numpy as np
 from typing import List
 from app.core.config import settings
+from app.core.pricing import estimate_tokens
+from app.core.telemetry import record_embedding
 from app.utils.logging import logger
 
 # Try Google GenAI SDKs first
@@ -22,8 +24,9 @@ class Embedder:
         self.api_key = settings.GEMINI_API_KEY
         self.model_name = settings.EMBEDDING_MODEL
         self._local_model = None
+        self.client = None
         
-        if self.api_key:
+        if settings.has_llm_key:
             if GENAI_NEW_SDK:
                 try:
                     self.client = genai.Client(api_key=self.api_key)
@@ -55,6 +58,7 @@ class Embedder:
                     )
                     vals = res.embeddings[0].values if hasattr(res, 'embeddings') and res.embeddings else res.embedding.values
                     embeddings.append(vals)
+                record_embedding("gemini", self.model_name, len(texts), sum(estimate_tokens(t) for t in texts))
                 arr = np.array(embeddings, dtype=np.float32)
                 # Normalize L2
                 norms = np.linalg.norm(arr, axis=1, keepdims=True)
@@ -68,6 +72,7 @@ class Embedder:
         if local_model:
             logger.info("Generating embeddings using local sentence-transformers fallback.")
             embeddings = local_model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+            record_embedding("sentence-transformers", "all-MiniLM-L6-v2", len(texts), sum(estimate_tokens(t) for t in texts))
             return embeddings.astype(np.float32)
 
         raise RuntimeError("No embedding provider available! Please verify GEMINI_API_KEY or sentence-transformers installation.")

@@ -31,6 +31,7 @@ class ChatResponse(BaseModel):
     conversation_id: str
     sources_used: List[Dict[str, Any]]
     suggested_questions: List[str] = Field(default_factory=list, description="AI-generated follow-up questions")
+    usage: Optional[Dict[str, Any]] = Field(default=None, description="Per-query latency (ms), token usage and estimated cost")
 
 class DocumentInfo(BaseModel):
     doc_id: str

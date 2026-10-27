@@ -45,4 +45,16 @@ class Settings:
         self.DEFAULT_TOP_K = int(os.getenv("DEFAULT_TOP_K", "15"))
         self.RERANK_TOP_K = int(os.getenv("RERANK_TOP_K", "5"))
 
+        # Retrieval strategy knobs (see evaluation/ and docs/EVALUATION_REPORT.md)
+        # CHUNK_STRATEGY: structure | fixed | sentence | semantic
+        self.CHUNK_STRATEGY = os.getenv("CHUNK_STRATEGY", "structure")
+        # RERANK_STRATEGY: cross-encoder | keyword | none | mmr | sentence-maxsim
+        self.RERANK_STRATEGY = os.getenv("RERANK_STRATEGY", "cross-encoder")
+        self.ENABLE_QUERY_REWRITE = os.getenv("ENABLE_QUERY_REWRITE", "true").lower() in ("1", "true", "yes")
+
+    @property
+    def has_llm_key(self) -> bool:
+        """True only for a real key, not the "your_api_key" placeholder."""
+        return bool(self.GEMINI_API_KEY) and self.GEMINI_API_KEY != "your_api_key"
+
 settings = Settings()

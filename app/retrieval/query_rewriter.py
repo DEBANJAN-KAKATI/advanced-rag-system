@@ -1,6 +1,7 @@
 import json
 from typing import List
 from app.core.config import settings
+from app.core.telemetry import record_llm_response
 from app.utils.logging import logger
 
 try:
@@ -15,7 +16,7 @@ def rewrite_query(query: str) -> List[str]:
     Returns original query + expanded queries.
     """
     queries = [query]
-    if not settings.GEMINI_API_KEY or not GENAI_AVAILABLE:
+    if not settings.has_llm_key or not GENAI_AVAILABLE:
         return queries
 
     try:
@@ -32,6 +33,7 @@ Output ONLY a JSON array of strings, e.g. ["query 1", "query 2"]. Do not add mar
             contents=prompt,
         )
         text = response.text.strip()
+        record_llm_response("query_rewrite", settings.LLM_MODEL, response, prompt, text)
         if text.startswith("```"):
             text = text.split("```")[1].strip()
             if text.startswith("json"):
