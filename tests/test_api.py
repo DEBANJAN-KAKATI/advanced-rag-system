@@ -74,6 +74,21 @@ def test_chat_json_and_stream(client):
     assert "6pm" in done["answer"]
 
 
+def test_streamed_answer_reports_usage(client, use_llm):
+    """Streaming advances the pipeline in worker threads; telemetry must survive that."""
+    from tests.conftest import FakeLLM
+    _upload(client, ("faq.txt", b"The office opens at 9am and closes at 6pm on weekdays.", "text/plain"))
+    use_llm(FakeLLM(answer="It opens at 9am [1].",
+                    rewrite='{"standalone": "When does the office open?", "queries": ["office hours"]}'))
+    with client.stream("POST", "/api/chat/stream", json={"question": "When does the office open?"}) as r:
+        body = "".join(r.iter_text())
+    done = json.loads(body.strip().split("\n\n")[-1].split("\n")[1].removeprefix("data: "))
+    usage = done["usage"]
+    assert usage["llm_calls"] == 2  # query rewrite + answer
+    assert {"query_rewrite", "retrieval", "generation", "rerank"} <= set(usage["stages_ms"])
+    assert usage["annotations"]["rerank_strategy_used"] == "keyword"
+
+
 def test_chat_validation(client):
     assert client.post("/api/chat", json={"question": ""}).status_code == 422
     assert client.post("/api/chat", json={"question": "   "}).status_code == 400

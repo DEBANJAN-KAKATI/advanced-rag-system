@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from app.core.config import settings
 from app.core.schemas import StatusResponse
 from app.generation import llm as llm_module
-from app.retrieval.reranker import reranker, CROSS_ENCODER_AVAILABLE
+from app.retrieval.reranker import reranker
 from app.retrieval.vectorstore import vector_store
 from app.utils.filetypes import supported_extensions_label
 
@@ -28,12 +28,14 @@ def status():
     elif not vector_store.vectors_ready and vector_store.chunks:
         warnings.append(f"Semantic index not ready: {vector_store.last_index_error or 'building...'}")
 
-    if not settings.ENABLE_RERANKER:
-        reranker_name = "disabled"
-    elif CROSS_ENCODER_AVAILABLE and reranker.uses_cross_encoder:
-        reranker_name = settings.RERANKER_MODEL
-    else:
-        reranker_name = "heuristic"
+    reranker_name = settings.RERANK_STRATEGY
+    if settings.RERANK_STRATEGY == "cross-encoder":
+        if reranker.uses_cross_encoder:
+            reranker_name = settings.RERANKER_MODEL
+        else:
+            reranker_name = "keyword (cross-encoder unavailable)"
+            warnings.append("RERANK_STRATEGY=cross-encoder but sentence-transformers is not installed: "
+                            "using keyword reranking instead.")
 
     return StatusResponse(
         llm_provider=client.provider if client else "none",

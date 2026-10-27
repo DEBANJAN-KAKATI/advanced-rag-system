@@ -8,6 +8,7 @@ from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 import faiss
 from app.core.config import settings
+from app.core.telemetry import stage
 from app.retrieval.chunker import chunk_search_text
 from app.retrieval.embedder import Embedder, EmbeddingError, create_embedder
 from app.retrieval.keyword import BM25Index
@@ -37,12 +38,19 @@ class VectorStore:
     current embedder, or unavailable (keyword-only retrieval until `ensure_index` succeeds).
     """
 
-    def __init__(self, store_dir: Optional[Path] = None, embedder=_UNSET):
+    def __init__(self, store_dir: Optional[Path] = None, embedder=_UNSET, persist: bool = True):
+        """
+        persist=False gives an in-memory store that never reads or writes disk; the
+        evaluation harness uses it so experiments cannot touch the user's index.
+        """
+        self.persist = persist
         self.save_dir = Path(store_dir or settings.VECTOR_STORE_DIR)
-        self.save_dir.mkdir(parents=True, exist_ok=True)
+        if persist:
+            self.save_dir.mkdir(parents=True, exist_ok=True)
         self.store_path = self.save_dir / "store.json"
         self.index_path = self.save_dir / "index.faiss"
         self.embedder: Optional[Embedder] = create_embedder() if embedder is _UNSET else embedder
+        self.cache_bm25 = True  # the evaluation harness turns this off to measure the uncached cost
 
         self._lock = threading.RLock()
         self.chunks: List[Dict[str, Any]] = []
@@ -52,7 +60,8 @@ class VectorStore:
         self.last_index_error: Optional[str] = None
         self._last_failed_attempt = 0.0
         self._bm25: Optional[BM25Index] = None
-        self._load()
+        if persist:
+            self._load()
 
     # ------------------------------------------------------------------ properties
     @property
@@ -114,6 +123,8 @@ class VectorStore:
         return docs
 
     def _save(self):
+        if not self.persist:
+            return
         data = {
             "version": FORMAT_VERSION,
             "embedding_signature": self.index_signature if self.index is not None else None,
@@ -193,6 +204,14 @@ class VectorStore:
             self._save()
             logger.info(f"Indexed {len(chunks)} chunks for '{doc_info.get('filename')}'. Total chunks: {len(self.chunks)}")
 
+    def add_chunks(self, chunks: List[Dict[str, Any]]):
+        """Adds pre-chunked documents, registering each document from its chunks' metadata."""
+        by_doc: Dict[str, List[Dict[str, Any]]] = {}
+        for c in chunks:
+            by_doc.setdefault(c["doc_id"], []).append(c)
+        for doc_id, info in self._documents_from_chunks(chunks).items():
+            self.add_document(info, by_doc[doc_id])
+
     def delete_document(self, doc_id: str) -> bool:
         """Removes a document. Remaining vectors are reused, never re-embedded."""
         with self._lock:
@@ -227,7 +246,8 @@ class VectorStore:
                 return [[] for _ in range(0 if query_vectors is None else len(query_vectors))]
             allowed = set(doc_filter) if doc_filter else None
             fetch_k = self.index.ntotal if allowed else min(top_k, self.index.ntotal)
-            scores, indices = self.index.search(np.ascontiguousarray(query_vectors, dtype=np.float32), fetch_k)
+            with stage("vector_search"):
+                scores, indices = self.index.search(np.ascontiguousarray(query_vectors, dtype=np.float32), fetch_k)
             results = []
             for row_scores, row_idx in zip(scores, indices):
                 row = []
@@ -248,7 +268,7 @@ class VectorStore:
         with self._lock:
             if not self.chunks:
                 return []
-            if self._bm25 is None:
+            if self._bm25 is None or not self.cache_bm25:
                 self._bm25 = BM25Index([chunk_search_text(c) for c in self.chunks])
             allowed = set(doc_filter) if doc_filter else None
             scored = [
@@ -261,6 +281,14 @@ class VectorStore:
     # ------------------------------------------------------------------ accessors
     def get_all_chunks(self) -> List[Dict[str, Any]]:
         return list(self.chunks)
+
+    def get_vectors(self, chunk_ids: List[str]) -> np.ndarray:
+        """Stored (normalized) vectors for the given chunk IDs, in the same order."""
+        with self._lock:
+            if not self.vectors_ready:
+                raise EmbeddingError("Vector index is not available.")
+            row_by_id = {c["chunk_id"]: i for i, c in enumerate(self.chunks)}
+            return np.vstack([self.index.reconstruct(row_by_id[cid]) for cid in chunk_ids])
 
     def get_document_chunks(self, doc_id: str) -> List[Dict[str, Any]]:
         return [c for c in self.chunks if c["doc_id"] == doc_id]

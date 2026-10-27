@@ -43,6 +43,8 @@ class ChatResponse(BaseModel):
     llm_used: bool = Field(False, description="False when the answer was extracted without an LLM")
     notice: Optional[str] = Field(None, description="Warning to show with the answer (e.g. LLM unavailable)")
     retrieval_mode: str = "hybrid"
+    usage: Optional[Dict[str, Any]] = Field(
+        default=None, description="Per-query latency (ms) by stage, LLM/embedding token counts and estimated cost")
 
 
 class DocumentInfo(BaseModel):

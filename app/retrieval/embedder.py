@@ -2,6 +2,8 @@ import threading
 from typing import List, Optional
 import numpy as np
 from app.core.config import settings
+from app.core.pricing import estimate_tokens
+from app.core.telemetry import record_embedding
 from app.utils.logging import logger
 from app.utils.retry import call_with_retry, describe_error
 
@@ -45,6 +47,13 @@ class Embedder:
     def embed_queries(self, texts: List[str]) -> np.ndarray:
         raise NotImplementedError
 
+    # Older single-purpose names, kept for callers such as the evaluation harness.
+    def embed_texts(self, texts: List[str]) -> np.ndarray:
+        return self.embed_documents(texts)
+
+    def embed_query(self, query: str) -> np.ndarray:
+        return self.embed_queries([query])
+
 
 class GeminiEmbedder(Embedder):
     BATCH_SIZE = 100  # Gemini batch embedding limit per request
@@ -78,6 +87,7 @@ class GeminiEmbedder(Embedder):
             if not res.embeddings or len(res.embeddings) != len(batch):
                 raise EmbeddingError("Gemini embedding returned an unexpected number of vectors.")
             vectors.extend(e.values for e in res.embeddings)
+            record_embedding("gemini", self.model, len(batch), sum(estimate_tokens(t) for t in batch))
         return _normalize(np.array(vectors, dtype=np.float32))
 
     def embed_documents(self, texts: List[str]) -> np.ndarray:
@@ -119,6 +129,7 @@ class LocalEmbedder(Embedder):
             return np.empty((0, 0), dtype=np.float32)
         vectors = self._get_model().encode(texts, batch_size=32, convert_to_numpy=True,
                                            normalize_embeddings=True, show_progress_bar=False)
+        record_embedding("local", self.model_name, len(texts), sum(estimate_tokens(t) for t in texts))
         return np.asarray(vectors, dtype=np.float32)
 
     def embed_documents(self, texts: List[str]) -> np.ndarray:

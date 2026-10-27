@@ -25,17 +25,27 @@ def test_cross_encoder_scores_are_probabilities(monkeypatch, raw_high, raw_low):
     r = Reranker()
     monkeypatch.setattr(r, "_get_cross_encoder",
                         lambda: FakeCrossEncoder(lambda q, t: raw_high if "match" in t else raw_low))
-    ranked, scorer = r.rerank("query", _chunks("nothing", "a match"))
+    ranked, scorer = r.rerank("query", _chunks("nothing", "a match"), strategy="cross-encoder")
     assert scorer == "cross-encoder"
     assert ranked[0][0]["chunk_id"] == "c1"
     assert ranked[0][1] > 0.9 and ranked[1][1] < 0.05  # never double-sigmoided
 
 
-def test_heuristic_scores_stay_in_range():
+def test_keyword_scores_stay_in_range():
     ranked, scorer = Reranker().rerank("revenue growth", _chunks("revenue growth revenue", "other"),
-                                       vector_scores={"c0": 0.99})
-    assert scorer == "heuristic"
+                                       strategy="keyword")
+    assert scorer == "keyword"
+    assert ranked[0][0]["chunk_id"] == "c0"
     assert all(0.0 <= s <= 1.0 for _, s in ranked)
+
+
+def test_unavailable_cross_encoder_falls_back_visibly(monkeypatch):
+    from app.core import telemetry
+    r = Reranker()
+    monkeypatch.setattr(r, "_get_cross_encoder", lambda: None)
+    with telemetry.trace() as t:
+        _, scorer = r.rerank("revenue", _chunks("revenue", "other"), strategy="cross-encoder")
+    assert scorer == "keyword" and t.annotations["rerank_strategy_used"] == "keyword"
 
 
 def test_rrf_rewards_agreement():
@@ -65,7 +75,8 @@ def test_cross_encoder_threshold_flags_unrelated_questions(tmp_path, monkeypatch
     _setup_store(tmp_path, monkeypatch)
     monkeypatch.setattr(retriever_module.reranker, "_get_cross_encoder",
                         lambda: FakeCrossEncoder(lambda q, t: -9.0))  # nothing is relevant
-    result = retriever_module.retrieve_relevant_chunks("Is the data encrypted?")
+    result = retriever_module.retrieve_relevant_chunks(
+        "Is the data encrypted?", config=retriever_module.RetrievalConfig(rerank_strategy="cross-encoder"))
     assert result.scorer == "cross-encoder" and result.low_relevance
     assert len(result.chunks) <= 3
 

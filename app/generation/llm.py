@@ -2,6 +2,8 @@ import json
 from typing import Iterator, Optional
 import httpx
 from app.core.config import settings
+from app.core.pricing import estimate_tokens
+from app.core.telemetry import record_llm_call
 from app.utils.logging import logger
 from app.utils.retry import call_with_retry, describe_error, error_status_code
 
@@ -25,11 +27,23 @@ class LLMClient:
     def description(self) -> str:
         return f"{self.provider}:{self.model}"
 
-    def generate(self, system: str, prompt: str, json_mode: bool = False, fast: bool = False) -> str:
+    def generate(self, system: str, prompt: str, json_mode: bool = False, fast: bool = False,
+                 purpose: str = "llm") -> str:
         raise NotImplementedError
 
-    def stream(self, system: str, prompt: str) -> Iterator[str]:
+    def stream(self, system: str, prompt: str, purpose: str = "answer") -> Iterator[str]:
         raise NotImplementedError
+
+    def _record(self, purpose: str, system: str, prompt: str, output: str,
+                input_tokens: Optional[int] = None, output_tokens: Optional[int] = None):
+        """Records token usage for the active trace; estimates (chars / 4) when the API reports none."""
+        estimated = input_tokens is None or output_tokens is None
+        record_llm_call(
+            purpose, self.model,
+            input_tokens if input_tokens is not None else estimate_tokens(system + prompt),
+            output_tokens if output_tokens is not None else estimate_tokens(output),
+            estimated=estimated, provider=self.provider,
+        )
 
 
 class GeminiLLM(LLMClient):
@@ -52,7 +66,17 @@ class GeminiLLM(LLMClient):
             kwargs["thinking_config"] = genai_types.ThinkingConfig(thinking_budget=0)
         return genai_types.GenerateContentConfig(**kwargs)
 
-    def generate(self, system: str, prompt: str, json_mode: bool = False, fast: bool = False) -> str:
+    @staticmethod
+    def _usage(response):
+        """(input, output) tokens from usage_metadata; thinking tokens are billed as output."""
+        usage = getattr(response, "usage_metadata", None)
+        if usage is None or getattr(usage, "prompt_token_count", None) is None:
+            return None, None
+        output = (getattr(usage, "candidates_token_count", 0) or 0) + (getattr(usage, "thoughts_token_count", 0) or 0)
+        return usage.prompt_token_count, output
+
+    def generate(self, system: str, prompt: str, json_mode: bool = False, fast: bool = False,
+                 purpose: str = "llm") -> str:
         def call(use_fast: bool):
             return call_with_retry(
                 lambda: self.client.models.generate_content(
@@ -73,26 +97,37 @@ class GeminiLLM(LLMClient):
         except Exception as e:
             raise LLMError(describe_error(e)) from e
         text = (response.text or "").strip()
+        self._record(purpose, system, prompt, text, *self._usage(response))
         if not text:
             raise LLMError("the model returned an empty response (it may have been blocked by safety filters)")
         return text
 
-    def stream(self, system: str, prompt: str) -> Iterator[str]:
+    def stream(self, system: str, prompt: str, purpose: str = "answer") -> Iterator[str]:
         def start():
             iterator = iter(self.client.models.generate_content_stream(
                 model=self.model, contents=prompt, config=self._config(system)))
             return iterator, next(iterator, None)
 
+        parts, last = [], None
         try:
             iterator, first = call_with_retry(start, what="Gemini streaming",
                                               max_total_wait=settings.LLM_MAX_RETRY_WAIT_SECONDS)
-            if first is not None and first.text:
-                yield first.text
+            if first is not None:
+                last = first
+                if first.text:
+                    parts.append(first.text)
+                    yield first.text
             for chunk in iterator:
+                last = chunk
                 if chunk.text:
+                    parts.append(chunk.text)
                     yield chunk.text
         except Exception as e:
             raise LLMError(describe_error(e)) from e
+        finally:
+            # The final streamed chunk carries the usage totals for the whole response.
+            if parts or last is not None:
+                self._record(purpose, system, prompt, "".join(parts), *self._usage(last))
 
 
 class OpenAICompatibleLLM(LLMClient):
@@ -113,7 +148,8 @@ class OpenAICompatibleLLM(LLMClient):
             "stream": stream,
         }
 
-    def generate(self, system: str, prompt: str, json_mode: bool = False, fast: bool = False) -> str:
+    def generate(self, system: str, prompt: str, json_mode: bool = False, fast: bool = False,
+                 purpose: str = "llm") -> str:
         def call():
             r = self.http.post(f"{self.base_url}/chat/completions", json=self._payload(system, prompt, False))
             r.raise_for_status()
@@ -124,11 +160,14 @@ class OpenAICompatibleLLM(LLMClient):
             text = (data["choices"][0]["message"].get("content") or "").strip()
         except Exception as e:
             raise LLMError(describe_error(e)) from e
+        usage = data.get("usage") or {}
+        self._record(purpose, system, prompt, text, usage.get("prompt_tokens"), usage.get("completion_tokens"))
         if not text:
             raise LLMError("the model returned an empty response")
         return text
 
-    def stream(self, system: str, prompt: str) -> Iterator[str]:
+    def stream(self, system: str, prompt: str, purpose: str = "answer") -> Iterator[str]:
+        parts = []
         try:
             with self.http.stream("POST", f"{self.base_url}/chat/completions",
                                   json=self._payload(system, prompt, True)) as r:
@@ -144,9 +183,13 @@ class OpenAICompatibleLLM(LLMClient):
                     except (ValueError, KeyError, IndexError):
                         continue
                     if delta:
+                        parts.append(delta)
                         yield delta
         except Exception as e:
             raise LLMError(describe_error(e)) from e
+        finally:
+            if parts:
+                self._record(purpose, system, prompt, "".join(parts))
 
 
 def create_llm() -> Optional[LLMClient]:

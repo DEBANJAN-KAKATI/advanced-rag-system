@@ -1,6 +1,6 @@
 import json
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from app.core.config import settings
 from app.generation.llm import LLMError, llm
 from app.generation.prompts import QUERY_REWRITE_PROMPT, QUERY_REWRITE_SYSTEM
@@ -15,16 +15,17 @@ def _parse_json_object(text: str) -> dict:
     return json.loads(match.group(0) if match else text)
 
 
-def rewrite_query(question: str, chat_history: str = "") -> Tuple[str, List[str]]:
+def rewrite_query(question: str, chat_history: str = "", expand: Optional[bool] = None) -> Tuple[str, List[str]]:
     """
     Returns (standalone_question, search_queries).
 
     With conversation history, follow-ups like "what about Q4?" are rewritten into
     self-contained questions before searching. Alternative phrasings are added when
-    QUERY_REWRITE is enabled. Without an LLM, the question is used as-is.
+    `expand` (default: QUERY_REWRITE) is on. Without an LLM, the question is used as-is.
     """
     question = question.strip()
-    if llm is None or not (settings.QUERY_REWRITE or chat_history):
+    expand = settings.QUERY_REWRITE if expand is None else expand
+    if llm is None or not (expand or chat_history):
         return question, [question]
 
     try:
@@ -33,6 +34,7 @@ def rewrite_query(question: str, chat_history: str = "") -> Tuple[str, List[str]
             QUERY_REWRITE_PROMPT.format(chat_history=chat_history, question=question),
             json_mode=True,
             fast=True,
+            purpose="query_rewrite",
         )
         parsed = _parse_json_object(raw)
     except (LLMError, ValueError, TypeError) as e:
@@ -45,7 +47,7 @@ def rewrite_query(question: str, chat_history: str = "") -> Tuple[str, List[str]
     queries = [standalone]
     if question.lower() != standalone.lower():
         queries.append(question)
-    if settings.QUERY_REWRITE and isinstance(parsed, dict):
+    if expand and isinstance(parsed, dict):
         for q in parsed.get("queries") or []:
             if isinstance(q, str) and q.strip() and q.strip().lower() not in {x.lower() for x in queries}:
                 queries.append(q.strip())

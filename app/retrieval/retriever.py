@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any, Tuple, Optional
 from app.core.config import settings
 from app.core.schemas import AnswerStyle
+from app.core.telemetry import stage
 from app.retrieval.embedder import EmbeddingError
 from app.retrieval.keyword import tokenize
 from app.retrieval.query_rewriter import rewrite_query
@@ -20,12 +21,22 @@ _GENERIC_WORDS = {"report", "paper", "pdf", "book", "text", "article", "entire",
 
 
 @dataclass
+class RetrievalConfig:
+    """Which retrieval stages run. Defaults reproduce the app's configured pipeline."""
+    use_dense: bool = True
+    use_bm25: bool = True
+    use_query_rewrite: bool = field(default_factory=lambda: settings.QUERY_REWRITE)
+    rerank_strategy: str = field(default_factory=lambda: settings.RERANK_STRATEGY)
+    candidate_k: int = field(default_factory=lambda: settings.CANDIDATE_TOP_K)
+
+
+@dataclass
 class RetrievalResult:
     chunks: List[Tuple[Dict[str, Any], float]]
     standalone_question: str
     queries: List[str]
-    mode: str = "hybrid"          # hybrid | keyword | summary
-    scorer: str = "heuristic"     # cross-encoder | heuristic
+    mode: str = "hybrid"          # hybrid | dense | keyword | summary
+    scorer: str = "keyword"       # the rerank strategy that actually ran
     low_relevance: bool = False
     notices: List[str] = field(default_factory=list)
 
@@ -46,12 +57,12 @@ def is_summary_request(question: str) -> bool:
     return len(remaining) == 0
 
 
-def _summary_chunks(doc_filter: Optional[List[str]]) -> List[Tuple[Dict[str, Any], float]]:
+def _summary_chunks(store, doc_filter: Optional[List[str]]) -> List[Tuple[Dict[str, Any], float]]:
     """
     Similarity search cannot answer "summarize the document", so pick passages spread
     evenly through each document in scope, within the summary character budget.
     """
-    chunks = vector_store.get_all_chunks()
+    chunks = store.get_all_chunks()
     doc_ids = list(dict.fromkeys(c["doc_id"] for c in chunks if not doc_filter or c["doc_id"] in doc_filter))
     if not doc_ids:
         return []
@@ -73,49 +84,65 @@ def retrieve_relevant_chunks(
     doc_filter: Optional[List[str]] = None,
     chat_history: str = "",
     top_k: Optional[int] = None,
+    store=None,
+    config: Optional[RetrievalConfig] = None,
 ) -> RetrievalResult:
     """
     Hybrid retrieval pipeline:
     1. Rewrite the question into a standalone query (+ alternatives) using the conversation
     2. Vector search (all queries embedded in one call) and BM25 keyword search per query
     3. Reciprocal Rank Fusion of all ranked lists
-    4. Rerank fused candidates and drop passages below the relevance threshold
+    4. Rerank fused candidates and, with the cross-encoder, drop passages below the
+       relevance threshold
+
+    `store` and `config` default to the app's global index and settings; the evaluation
+    harness passes its own to compare strategies.
     """
+    store = store or vector_store
+    config = config or RetrievalConfig()
+    if not (config.use_dense or config.use_bm25):
+        raise ValueError("RetrievalConfig must enable dense and/or BM25 search.")
     top_k = top_k or top_k_for_style(style)
     doc_filter = doc_filter or None
 
-    standalone, queries = rewrite_query(question, chat_history)
+    if config.use_query_rewrite or chat_history:
+        with stage("query_rewrite"):
+            standalone, queries = rewrite_query(question, chat_history, expand=config.use_query_rewrite)
+    else:
+        standalone, queries = question.strip(), [question.strip()]
 
     if is_summary_request(standalone):
-        chunks = _summary_chunks(doc_filter)
+        chunks = _summary_chunks(store, doc_filter)
         logger.info(f"Summary request: using {len(chunks)} passages spread across the document(s).")
-        return RetrievalResult(chunks, standalone, queries, mode="summary")
+        return RetrievalResult(chunks, standalone, queries, mode="summary", scorer="none")
 
     notices: List[str] = []
     vector_lists: List[List[Tuple[Dict[str, Any], float]]] = []
-    if vector_store.embedder is not None and not vector_store.vectors_ready:
-        vector_store.ensure_index()
-    if vector_store.vectors_ready:
-        try:
-            query_vectors = vector_store.embedder.embed_queries(queries)
-            vector_lists = vector_store.vector_search(query_vectors, settings.CANDIDATE_TOP_K, doc_filter)
-        except EmbeddingError as e:
-            logger.warning(f"Query embedding failed, using keyword search only: {e}")
-            notices.append("Semantic search was unavailable for this question, so keyword search was used.")
+    if config.use_dense and store.embedder is not None:
+        if not store.vectors_ready:
+            store.ensure_index()
+        if store.vectors_ready:
+            try:
+                with stage("embed_query"):
+                    query_vectors = store.embedder.embed_queries(queries)
+                vector_lists = store.vector_search(query_vectors, config.candidate_k, doc_filter)
+            except EmbeddingError as e:
+                logger.warning(f"Query embedding failed, using keyword search only: {e}")
+                notices.append("Semantic search was unavailable for this question, so keyword search was used.")
 
-    keyword_lists = [vector_store.keyword_search(q, settings.CANDIDATE_TOP_K, doc_filter) for q in queries]
-    mode = "hybrid" if vector_lists else "keyword"
+    keyword_lists = []
+    if config.use_bm25:
+        with stage("bm25"):
+            keyword_lists = [store.keyword_search(q, config.candidate_k, doc_filter) for q in queries]
+    mode = "hybrid" if vector_lists and keyword_lists else ("dense" if vector_lists else "keyword")
 
-    fused = reciprocal_rank_fusion(vector_lists + keyword_lists)[:settings.CANDIDATE_TOP_K]
+    with stage("fusion"):
+        fused = reciprocal_rank_fusion(vector_lists + keyword_lists)[:config.candidate_k]
     if not fused:
         return RetrievalResult([], standalone, queries, mode=mode, notices=notices)
 
-    vector_scores: Dict[str, float] = {}
-    for ranked in vector_lists:
-        for chunk, score in ranked:
-            vector_scores[chunk["chunk_id"]] = max(score, vector_scores.get(chunk["chunk_id"], -1.0))
-
-    reranked, scorer = reranker.rerank(standalone, [c for c, _ in fused], vector_scores)
+    reranked, scorer = reranker.rerank(standalone, [c for c, _ in fused],
+                                       strategy=config.rerank_strategy, store=store)
 
     low_relevance = False
     if scorer == "cross-encoder":

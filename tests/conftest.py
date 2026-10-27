@@ -23,6 +23,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
+from app.core.telemetry import record_llm_call  # noqa: E402
 from app.retrieval.embedder import Embedder  # noqa: E402
 from app.retrieval.vectorstore import VectorStore  # noqa: E402
 
@@ -56,7 +57,7 @@ class FakeEmbedder(Embedder):
 
 
 class FakeLLM:
-    """Records prompts and streams a canned answer."""
+    """Records prompts (and telemetry, like the real clients) and streams a canned answer."""
     provider = "fake"
     model = "fake-model"
 
@@ -66,18 +67,21 @@ class FakeLLM:
         self.rewrite = rewrite
         self.prompts = []
 
-    def generate(self, system, prompt, json_mode=False, fast=False):
+    def generate(self, system, prompt, json_mode=False, fast=False, purpose="llm"):
         self.prompts.append(prompt)
         if self.fail:
             raise self.fail
+        record_llm_call(purpose, self.model, len(prompt) // 4, 10, estimated=True, provider=self.provider)
         return self.rewrite or '{"standalone": "", "queries": []}'
 
-    def stream(self, system, prompt):
+    def stream(self, system, prompt, purpose="answer"):
         self.prompts.append(prompt)
         if self.fail:
             raise self.fail
         for i in range(0, len(self.answer), 5):
             yield self.answer[i:i + 5]
+        record_llm_call(purpose, self.model, len(prompt) // 4, len(self.answer) // 4,
+                        estimated=True, provider=self.provider)
 
 
 @pytest.fixture

@@ -89,7 +89,8 @@ class Settings:
         self.LLM_TIMEOUT_SECONDS = _env_int("LLM_TIMEOUT_SECONDS", 120)
         # Upper bound on total time spent waiting between retries on rate-limit errors.
         self.LLM_MAX_RETRY_WAIT_SECONDS = _env_int("LLM_MAX_RETRY_WAIT_SECONDS", 20)
-        self.QUERY_REWRITE = _env_bool("QUERY_REWRITE", True)
+        # ENABLE_QUERY_REWRITE is the older name of this setting and is still honoured.
+        self.QUERY_REWRITE = _env_bool("QUERY_REWRITE", _env_bool("ENABLE_QUERY_REWRITE", True))
         self.SUGGEST_FOLLOWUPS = _env_bool("SUGGEST_FOLLOWUPS", True)
 
         # --- Embeddings ---
@@ -101,12 +102,18 @@ class Settings:
         self.LOCAL_EMBEDDING_MODEL = os.getenv("LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
 
         # --- Reranking ---
+        # RERANK_STRATEGY: cross-encoder | keyword | none | mmr | sentence-maxsim
+        # (compared in docs/EVALUATION_REPORT.md). ENABLE_RERANKER=false is a shortcut for "keyword".
         self.ENABLE_RERANKER = _env_bool("ENABLE_RERANKER", True)
+        self.RERANK_STRATEGY = os.getenv("RERANK_STRATEGY",
+                                         "cross-encoder" if self.ENABLE_RERANKER else "keyword").strip().lower()
         self.RERANKER_MODEL = os.getenv("RERANKER_MODEL", "cross-encoder/ms-marco-MiniLM-L-6-v2")
         # Cross-encoder relevance (0-1) below which a passage is treated as unrelated.
         self.MIN_RELEVANCE_SCORE = _env_float("MIN_RELEVANCE_SCORE", 0.02)
 
         # --- Chunking & retrieval ---
+        # CHUNK_STRATEGY: structure | fixed | sentence | semantic (see docs/EVALUATION_REPORT.md)
+        self.CHUNK_STRATEGY = os.getenv("CHUNK_STRATEGY", "structure").strip().lower()
         # Sizes are in characters (~4 characters per token for English text).
         self.CHUNK_SIZE = _env_int("CHUNK_SIZE", 1200)
         self.CHUNK_OVERLAP = _env_int("CHUNK_OVERLAP", 200)
@@ -121,6 +128,11 @@ class Settings:
         # --- Conversation memory ---
         self.MEMORY_TURNS = _env_int("MEMORY_TURNS", 6)
         self.MAX_CONVERSATIONS = _env_int("MAX_CONVERSATIONS", 200)
+
+    @property
+    def has_llm_key(self) -> bool:
+        """True only for a real Gemini key, not the legacy "your_api_key" placeholder."""
+        return bool(self.GEMINI_API_KEY) and self.GEMINI_API_KEY != "your_api_key"
 
     def _resolve_llm_provider(self, requested: str) -> str:
         if requested in ("gemini", "openai", "none"):

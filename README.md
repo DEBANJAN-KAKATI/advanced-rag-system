@@ -31,6 +31,7 @@ Hybrid search · Cross-encoder reranking · Streaming answers · Gemini, OpenAI 
 - [Configuration](#%EF%B8%8F-configuration)
 - [API Reference](#-api-reference)
 - [Project Structure](#%EF%B8%8F-project-structure)
+- [Evaluation](#-evaluation)
 - [Testing](#-testing)
 - [Troubleshooting](#%EF%B8%8F-troubleshooting)
 - [Contributing](#-contributing)
@@ -98,6 +99,8 @@ It is built to keep working when things go wrong:
 - Scope questions to selected documents
 - Stop, New chat, Copy answer
 - Status endpoint showing active components
+- Per-query **latency, token and cost** reporting
+- **Evaluation harness** for retrieval accuracy and faithfulness
 - Pluggable LLMs: **Gemini**, **OpenAI**, **Ollama**, LM Studio, vLLM
 - Offline **pytest** suite
 
@@ -211,7 +214,8 @@ All settings are read from environment variables or a `.env` file. See [`.env.ex
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Any OpenAI-compatible endpoint (e.g. Ollama) |
 | `EMBEDDING_PROVIDER` | `auto` | `auto`, `gemini`, `local`, or `none` |
 | `LOCAL_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | sentence-transformers model for local embeddings |
-| `ENABLE_RERANKER` | `true` | Use the cross-encoder reranker |
+| `CHUNK_STRATEGY` | `structure` | `structure`, `fixed`, `sentence`, or `semantic` |
+| `RERANK_STRATEGY` | `cross-encoder` | `cross-encoder`, `keyword`, `none`, `mmr`, or `sentence-maxsim` |
 | `MIN_RELEVANCE_SCORE` | `0.02` | Passages scoring below this are treated as unrelated |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1200` / `200` | Chunk size and overlap, in characters |
 | `TOP_K_CONCISE` / `MEDIUM` / `LONG` | `4` / `6` / `10` | Passages given to the LLM per answer style |
@@ -268,7 +272,13 @@ curl -X POST http://localhost:8000/api/chat \
   ],
   "suggested_questions": ["What drove subscription growth?", "..."],
   "conversation_id": "a1b2c3d4e5f6",
-  "llm_used": true
+  "llm_used": true,
+  "usage": {
+    "total_ms": 1840.2,
+    "stages_ms": { "query_rewrite": 412.7, "embed_query": 95.1, "bm25": 0.9, "rerank": 31.4, "generation": 1290.6 },
+    "llm_calls": 2, "llm_input_tokens": 2310, "llm_output_tokens": 164,
+    "estimated_cost_usd": 0.00031
+  }
 }
 ```
 
@@ -313,12 +323,30 @@ advanced-rag-system/
 │   │   └── memory.py           # bounded conversation memory
 │   └── utils/
 ├── web/                        # UI (vendored marked + DOMPurify, works offline)
+├── evaluation/                 # evaluation harness: corpus, golden Q&A set, metrics, judges
 ├── tests/                      # offline pytest suite
-├── docs/                       # README assets
+├── docs/                       # evaluation report and README assets
 ├── .env.example
 ├── requirements.txt
 └── run.py                      # entry point
 ```
+
+---
+
+## 📊 Evaluation
+
+The [`evaluation/`](evaluation/README.md) harness measures the pipeline on a labelled question set built from public-domain Python PEPs (81 questions, verbatim evidence spans):
+
+- **Retrieval accuracy**: hit@k, evidence recall@k, MRR, nDCG, and recall within a fixed token budget
+- **Faithfulness**: share of answer claims supported by the retrieved sources (offline lexical judge, or an LLM judge), plus abstention on unanswerable questions
+- **Cost and speed per query**: per-stage latency and token usage, priced in dollars
+
+```bash
+pip install -r evaluation/requirements.txt
+python -m evaluation.run --suite full --generate --calibrate-judge lexical
+```
+
+Every chat response includes a `usage` object with this per-query telemetry. Findings and recommendations are in the [evaluation report](docs/EVALUATION_REPORT.md).
 
 ---
 
