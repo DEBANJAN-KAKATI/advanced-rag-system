@@ -387,8 +387,6 @@ No license has been chosen for this project yet. Until a `LICENSE` file is added
 
 <div align="center">
 
-Made with ❤️ by [Debanjan Kakati](https://github.com/DEBANJAN-KAKATI)
-
 ⭐ If you find this project useful, consider giving it a star!
 
 </div>
