@@ -91,6 +91,10 @@ SUITES = {
 BASELINE = ("structure-300", "hybrid-rrf")
 EVAL_TOP_K = 10  # rank depth scored; the app passes the top top_k_for_style(style) passages to the LLM
 
+# Model whose prices (app/core/pricing.py) are used to project per-query cost. It must be
+# priced: the app's configured model may be an alias or a provider without a price entry.
+COST_MODEL = "gemini-2.5-flash"
+
 # Assumptions used only to *project* per-query cost when no LLM was called.
 # Measured usage from a --generate run replaces them.
 PROJECTED_OUTPUT_TOKENS = {AnswerStyle.CONCISE: 100, AnswerStyle.MEDIUM: 250, AnswerStyle.LONG: 900}
@@ -121,7 +125,9 @@ def projected_cost(question: str, chunks: List[dict], style: AnswerStyle, full_p
         n_query_embeddings = 3  # standalone question + up to 2 rewrites, embedded in one call
         in_tok += PROJECTED_REWRITE_TOKENS[0]
         out_tok += PROJECTED_REWRITE_TOKENS[1] + PROJECTED_FOLLOWUP_OUTPUT_TOKENS
-    llm = cost_usd(settings.LLM_MODEL, in_tok, out_tok) or 0.0
+    llm = cost_usd(COST_MODEL, in_tok, out_tok)
+    if llm is None:
+        raise ValueError(f"No price for {COST_MODEL!r} in app/core/pricing.py; pass --cost-model with a priced model")
     emb = cost_usd(settings.EMBEDDING_MODEL, n_query_embeddings * estimate_tokens(question)) or 0.0
     return {"prompt_tokens": estimate_tokens(prompt), "input_tokens": in_tok, "output_tokens": out_tok,
             "cost_usd": llm + emb}
@@ -224,7 +230,7 @@ def summarize(rows, items, chunk_stats, max_recall) -> Dict:
         "stages_p50": {s: round(M.percentile([r["stages_ms"].get(s, 0.0) for r in rows], 50), 2) for s in stage_names},
     }
     out["projected_cost"] = {
-        "model": settings.LLM_MODEL,
+        "model": COST_MODEL,
         "prompt_tokens_mean": round(M.mean([r["projected"]["prompt_tokens"] for r in rows]), 1),
         "answer_only_usd_per_1k_queries": round(1000 * M.mean([r["projected"]["cost_usd"] for r in rows]), 4),
         "full_pipeline_usd_per_1k_queries": round(1000 * M.mean([r["projected_full"]["cost_usd"] for r in rows]), 4),
@@ -285,7 +291,7 @@ def fmt(x, nd=3):
 def write_markdown(path: Path, env, summaries, skipped, calibration, pvals):
     L = [f"# Evaluation results: {env['name']}", "",
          f"- Date: {env['date']}  |  git: `{env['git_sha']}`  |  embedder: {env['embedder']}  |  "
-         f"LLM for cost projection: {env['llm_model']}",
+         f"LLM for cost projection: {env['cost_model']}",
          f"- Questions: {env['n_questions']} ({env['n_answerable']} answerable)  |  retrieval depth scored: "
          f"top-{EVAL_TOP_K}  |  chunks sent to LLM: top-{env['llm_top_k']}", ""]
     if skipped:
@@ -377,6 +383,7 @@ def write_markdown(path: Path, env, summaries, skipped, calibration, pvals):
 
 
 def main(argv=None) -> int:
+    global COST_MODEL
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--suite", choices=list(SUITES), default="full")
     parser.add_argument("--chunking", nargs="+", choices=list(CHUNKING_CONFIGS), help="overrides the suite's list")
@@ -388,6 +395,8 @@ def main(argv=None) -> int:
                         help="also generate answers ('full' includes follow-up question generation)")
     parser.add_argument("--judge", choices=["lexical", "llm"], default="lexical")
     parser.add_argument("--calibrate-judge", nargs="*", choices=["lexical", "llm"], default=None)
+    parser.add_argument("--cost-model", default=COST_MODEL,
+                        help="priced model (see app/core/pricing.py) used to project per-query cost")
     parser.add_argument("--no-bm25-cache", action="store_true", help="rebuild BM25 per query (pre-fix behaviour)")
     parser.add_argument("--limit", type=int, help="only the first N questions (smoke test)")
     parser.add_argument("--name", default=None, help="results sub-directory name")
@@ -396,6 +405,7 @@ def main(argv=None) -> int:
     args = parser.parse_args(argv)
 
     logging.getLogger("rag_system").setLevel(logging.WARNING)
+    COST_MODEL = args.cost_model
     items = load_dataset(args.dataset)[: args.limit] if args.limit else load_dataset(args.dataset)
     corpus = load_corpus()
     problems = validate(items, corpus)
@@ -436,6 +446,7 @@ def main(argv=None) -> int:
         "name": name, "date": dt.datetime.now().isoformat(timespec="seconds"), "git_sha": sha,
         "python": platform.python_version(), "platform": platform.platform(),
         "embedder": getattr(embedder, "name", args.embedder), "llm_model": settings.LLM_MODEL,
+        "cost_model": COST_MODEL,
         "llm_top_k": top_k_for_style(style), "chars_per_token": CHARS_PER_TOKEN,
         "embedding_model_for_cost": settings.EMBEDDING_MODEL, "has_llm_key": settings.has_llm_key,
         "n_questions": len(items), "n_answerable": sum(i.answerable for i in items),
