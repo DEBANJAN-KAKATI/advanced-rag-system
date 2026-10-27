@@ -1,81 +1,146 @@
+import threading
+from typing import List, Optional
 import numpy as np
-from typing import List
 from app.core.config import settings
 from app.utils.logging import logger
+from app.utils.retry import call_with_retry, describe_error
 
-# Try Google GenAI SDKs first
 try:
     from google import genai
-    GENAI_NEW_SDK = True
+    from google.genai import types as genai_types
+    GENAI_AVAILABLE = True
 except ImportError:
-    GENAI_NEW_SDK = False
+    GENAI_AVAILABLE = False
 
-# Local sentence-transformers fallback
 try:
     from sentence_transformers import SentenceTransformer
     LOCAL_EMBEDDER_AVAILABLE = True
 except ImportError:
     LOCAL_EMBEDDER_AVAILABLE = False
 
+
+class EmbeddingError(RuntimeError):
+    """Raised when texts cannot be embedded. Never silently falls back to another model."""
+
+
+def _normalize(arr: np.ndarray) -> np.ndarray:
+    arr = np.asarray(arr, dtype=np.float32)
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return arr / norms
+
+
 class Embedder:
-    def __init__(self):
-        self.api_key = settings.GEMINI_API_KEY
-        self.model_name = settings.EMBEDDING_MODEL
-        self._local_model = None
-        
-        if self.api_key:
-            if GENAI_NEW_SDK:
-                try:
-                    self.client = genai.Client(api_key=self.api_key)
-                    logger.info("Initialized Google GenAI Embedder client.")
-                except Exception as e:
-                    logger.warning(f"Could not init GenAI Client: {e}")
-                    self.client = None
+    """
+    Base embedder. Every vector in an index must come from the same model, so each
+    embedder exposes a `signature`; the vector store re-embeds when it changes
+    instead of mixing vector spaces.
+    """
+    signature = "none"
+    description = "none"
 
-    def _get_local_model(self):
-        if self._local_model is None and LOCAL_EMBEDDER_AVAILABLE:
-            logger.info("Loading local sentence-transformers model (all-MiniLM-L6-v2)...")
-            self._local_model = SentenceTransformer('all-MiniLM-L6-v2')
-        return self._local_model
+    def embed_documents(self, texts: List[str]) -> np.ndarray:
+        raise NotImplementedError
 
-    def embed_texts(self, texts: List[str]) -> np.ndarray:
-        """Embed a list of text strings into numpy vector array."""
+    def embed_queries(self, texts: List[str]) -> np.ndarray:
+        raise NotImplementedError
+
+
+class GeminiEmbedder(Embedder):
+    BATCH_SIZE = 100  # Gemini batch embedding limit per request
+
+    def __init__(self, api_key: str, model: str):
+        if not GENAI_AVAILABLE:
+            raise EmbeddingError("google-genai is not installed (pip install google-genai).")
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
+        self.signature = f"gemini:{model}"
+        self.description = f"Gemini {model}"
+
+    def _embed(self, texts: List[str], task_type: str) -> np.ndarray:
         if not texts:
-            return np.empty((0, 768), dtype=np.float32)
-
-        # 1. Try Gemini API via new SDK
-        if GENAI_NEW_SDK and hasattr(self, 'client') and self.client:
+            return np.empty((0, 0), dtype=np.float32)
+        vectors: List[List[float]] = []
+        for start in range(0, len(texts), self.BATCH_SIZE):
+            batch = texts[start:start + self.BATCH_SIZE]
             try:
-                embeddings = []
-                # Batch embed
-                for text in texts:
-                    res = self.client.models.embed_content(
-                        model=self.model_name,
-                        contents=text,
-                    )
-                    vals = res.embeddings[0].values if hasattr(res, 'embeddings') and res.embeddings else res.embedding.values
-                    embeddings.append(vals)
-                arr = np.array(embeddings, dtype=np.float32)
-                # Normalize L2
-                norms = np.linalg.norm(arr, axis=1, keepdims=True)
-                norms[norms == 0] = 1.0
-                return arr / norms
+                res = call_with_retry(
+                    lambda: self.client.models.embed_content(
+                        model=self.model,
+                        contents=batch,
+                        config=genai_types.EmbedContentConfig(task_type=task_type),
+                    ),
+                    what="Gemini embedding",
+                    max_total_wait=max(settings.LLM_MAX_RETRY_WAIT_SECONDS, 30),
+                )
             except Exception as e:
-                logger.warning(f"Gemini embedding via GenAI SDK failed: {type(e).__name__} - {e}. Trying legacy...")
+                raise EmbeddingError(f"Gemini embedding failed: {describe_error(e)}") from e
+            if not res.embeddings or len(res.embeddings) != len(batch):
+                raise EmbeddingError("Gemini embedding returned an unexpected number of vectors.")
+            vectors.extend(e.values for e in res.embeddings)
+        return _normalize(np.array(vectors, dtype=np.float32))
 
-        # Fallback to local sentence transformer
-        local_model = self._get_local_model()
-        if local_model:
-            logger.info("Generating embeddings using local sentence-transformers fallback.")
-            embeddings = local_model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
-            return embeddings.astype(np.float32)
+    def embed_documents(self, texts: List[str]) -> np.ndarray:
+        return self._embed(texts, "RETRIEVAL_DOCUMENT")
 
-        raise RuntimeError("No embedding provider available! Please verify GEMINI_API_KEY or sentence-transformers installation.")
+    def embed_queries(self, texts: List[str]) -> np.ndarray:
+        return self._embed(texts, "RETRIEVAL_QUERY")
 
-    def embed_query(self, query: str) -> np.ndarray:
-        """Embed a single search query string."""
 
-        arr = self.embed_texts([query])
-        return arr
+class LocalEmbedder(Embedder):
+    """sentence-transformers model running on this machine (no API quota, works offline)."""
 
-embedder = Embedder()
+    def __init__(self, model: str):
+        if not LOCAL_EMBEDDER_AVAILABLE:
+            raise EmbeddingError(
+                "Local embeddings need sentence-transformers (pip install sentence-transformers), "
+                "or set GEMINI_API_KEY to use Gemini embeddings."
+            )
+        self.model_name = model
+        self.signature = f"local:{model}"
+        self.description = f"Local {model}"
+        self._model = None
+        self._lock = threading.Lock()
+        # BGE models retrieve better when short queries carry this instruction prefix.
+        self.query_prefix = "Represent this sentence for searching relevant passages: " if "bge" in model.lower() else ""
+
+    def _get_model(self):
+        with self._lock:
+            if self._model is None:
+                logger.info(f"Loading local embedding model {self.model_name} (first use may download it)...")
+                try:
+                    self._model = SentenceTransformer(self.model_name)
+                except Exception as e:
+                    raise EmbeddingError(f"Could not load local embedding model '{self.model_name}': {e}") from e
+            return self._model
+
+    def _encode(self, texts: List[str]) -> np.ndarray:
+        if not texts:
+            return np.empty((0, 0), dtype=np.float32)
+        vectors = self._get_model().encode(texts, batch_size=32, convert_to_numpy=True,
+                                           normalize_embeddings=True, show_progress_bar=False)
+        return np.asarray(vectors, dtype=np.float32)
+
+    def embed_documents(self, texts: List[str]) -> np.ndarray:
+        return self._encode(texts)
+
+    def embed_queries(self, texts: List[str]) -> np.ndarray:
+        return self._encode([self.query_prefix + t for t in texts])
+
+
+def create_embedder() -> Optional[Embedder]:
+    """
+    Builds the configured embedder. Returns None when no embedding backend is usable,
+    in which case the system runs keyword-only (BM25) retrieval.
+    """
+    provider = settings.EMBEDDING_PROVIDER
+    try:
+        if provider == "gemini":
+            if not settings.GEMINI_API_KEY:
+                raise EmbeddingError("EMBEDDING_PROVIDER=gemini but no GEMINI_API_KEY is set.")
+            return GeminiEmbedder(settings.GEMINI_API_KEY, settings.EMBEDDING_MODEL)
+        if provider == "local":
+            return LocalEmbedder(settings.LOCAL_EMBEDDING_MODEL)
+    except EmbeddingError as e:
+        logger.warning(f"{e} Falling back to keyword-only retrieval.")
+    return None

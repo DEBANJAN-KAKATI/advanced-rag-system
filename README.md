@@ -1,163 +1,127 @@
-#  Advanced RAG System
+# Advanced RAG System (jstRAG)
 
-A production-grade, multi-format **Retrieval-Augmented Generation (RAG)** application built in **Python** with **FastAPI** and a modern web interface.  
-This system is designed to help users deeply understand documents by asking questions over uploaded files and receiving grounded, well-structured answers.
+A local **Retrieval-Augmented Generation** app: upload documents, ask questions, and get answers that are grounded in your files, with **numbered, clickable citations** that show the exact source passage.
 
-It supports:
-- **PDF**
-- **DOC / DOCX**
-- **HTML**
-- **TXT**
-- other readable text-based files
-
-It also provides **answer length control**:
-- **Concise**
-- **Medium**
-- **Detailed**
-
-With advanced retrieval, strong grounding, fallback handling, and a polished UI, this project goes far beyond a basic document chatbot.
+Built with **FastAPI**, **FAISS**, BM25, an optional cross-encoder reranker, and **Gemini** or any **OpenAI-compatible** model (OpenAI, Ollama, LM Studio, vLLM). It works fully offline with a local model, and it still works with no model at all (extractive answers).
 
 ---
 
-##  Key Highlights
+## Features
 
-- Multi-format document ingestion
-- Intelligent PDF extraction with OCR fallback
-- Hybrid retrieval using semantic + keyword search
-- Query rewriting for better search quality
-- Reranking for more accurate context selection
-- Gemini-powered answer generation
-- Citation-aware responses
-- Concise / Medium / Detailed answer modes
-- Conversation memory for follow-up questions
-- Clickable AI-generated follow-up suggestions
-- Offline fallback when API limits are reached
-- Beautiful interactive web dashboard
-
----
-
-##  What This System Does
-
-This application allows you to upload documents and ask natural language questions about them.
-
-Example questions:
-- “Summarize this report.”
-- “What does the document say about pricing?”
-- “Explain the methodology in detail.”
-- “Give me a concise answer.”
-- “What are the main conclusions?”
-
-The system reads the content, retrieves the most relevant sections, and generates an answer grounded in the uploaded files.
+- **Formats:** PDF (OCR fallback for scanned pages), DOCX, HTML, TXT/Markdown/RST, CSV, JSON, Python
+- **Structure-aware chunking:** splits at paragraph/sentence boundaries, tracks section headings across pages, records page ranges
+- **Hybrid retrieval:** vector search + BM25 keyword search, merged with Reciprocal Rank Fusion
+- **Reranking:** cross-encoder relevance scores (0–1) filter out unrelated passages
+- **Conversation-aware:** follow-ups like *"and what about Q4?"* are rewritten into standalone search queries
+- **Whole-document summaries:** "Summarize this document" samples passages across the entire file instead of only the closest matches
+- **Streaming answers** with inline `[1]` citations that open the full source passage
+- **Answer styles:** Concise / Medium / Detailed (detailed answers also get more context)
+- **Scope questions** to selected documents
+- **Honest confidence** labels, and an explicit *"I couldn't find this in the uploaded documents"* instead of guessing
+- **Graceful degradation:** when the LLM is unavailable (quota, bad key, offline), you get an extractive answer from the most relevant sentences, with the reason shown
+- **Safe ingestion:** duplicate detection by content hash, same-name re-uploads replace the old version, upload size limit, no path traversal
 
 ---
 
-##  How to Run It
+## Quick start
 
-You have two ways to run the application:
+```bash
+pip install -r requirements.txt      # see requirements.txt for a smaller CPU-only torch install
+cp .env.example .env                 # then add your GEMINI_API_KEY (optional)
+python run.py                        # opens http://localhost:8000
+```
 
-### Option 1: Running the Executable (Windows)
-If you just want to run the app without installing Python or any dependencies:
-1. Double-click the `jstRAG.exe` file in the root folder.
-2. A command prompt window will open showing the server starting.
-3. Open your web browser and go to `http://localhost:8000`.
+Python 3.9+ is required. The data (uploaded files and index) lives in `./data`.
 
-### Option 2: Running from Source
-If you want to run it via Python:
-1. Ensure you have Python 3.9+ installed.
-2. Open a terminal in the project directory.
-3. Install dependencies (optional if already installed): `pip install -r requirements.txt`
-4. Run the server: `python run.py`
-5. Open your web browser and go to `http://localhost:8000`.
+### Choosing a model
 
----
+| Setup | `.env` | Notes |
+|---|---|---|
+| **Gemini** (default) | `GEMINI_API_KEY=...` | Free tier available. Uses `gemini-flash-latest` and `gemini-embedding-001`. |
+| **Fully local** (Ollama) | `LLM_PROVIDER=openai`<br>`OPENAI_BASE_URL=http://localhost:11434/v1`<br>`LLM_MODEL=llama3.1` | No API key or quota. Embeddings and reranking run locally via sentence-transformers. |
+| **OpenAI** | `LLM_PROVIDER=openai`<br>`OPENAI_API_KEY=...`<br>`LLM_MODEL=gpt-4o-mini` | |
+| **No LLM** | nothing | Answers are the most relevant extracted sentences, still cited. |
 
-##  Where to Place the API Key
+The legacy `api_key_here` file (Gemini key on the first non-comment line) is still read if `GEMINI_API_KEY` is not set.
 
-This system uses Google's Gemini AI to generate answers. You need to provide an API key.
-
-1. Open the file named `api_key_here` located in the root of the project directory.
-2. Paste your Gemini API key directly into this file, just below the comment line.
-3. Save the file.
-*(Note: Do not use quotes or add extra spaces. The system will automatically read it and ignore comments or blank lines).*
+Every setting is documented in [`.env.example`](.env.example). Changing the embedding model is safe: the index notices and re-embeds your documents on the next start.
 
 ---
 
-## What Happens When Your Quota is Finished?
+## How a question is answered
 
-Google's free-tier Gemini API has strict daily and per-minute rate limits. Because this advanced RAG system makes multiple calls per question (for query rewriting, embeddings, and answer generation), it is easy to exhaust the free quota.
+1. **Query rewriting**: the question and recent conversation become a standalone query plus up to two alternative phrasings (one small LLM call).
+2. **Retrieval**: all queries are embedded in one call and searched in FAISS; BM25 runs on each query; results are fused with RRF.
+3. **Reranking**: a cross-encoder scores each candidate; passages below `MIN_RELEVANCE_SCORE` are dropped.
+4. **Generation**: the top passages are numbered `[1]..[n]` and the model must cite them. Passages are treated as untrusted data (prompt-injection guard). The answer streams to the UI, and follow-up suggestions come from the same call.
+5. **Post-processing**: invalid citation numbers are removed, only the cited sources are listed, and confidence is derived from reranker relevance.
 
-**Here is how the system intelligently handles rate limits:**
-
-1. **Automatic Retries:** If you hit a per-minute limit, the system detects the "Resource Exhausted" error, reads exactly how long it needs to wait, pauses gracefully, and retries your request up to 3 times in the background.
-2. **Offline Fallback Mode:** If your daily quota is fully exhausted, the system **will not break or throw an ugly error**. Instead, it seamlessly switches to an "Offline Fallback" mode.
-
-### How It Answers in Offline Fallback Mode
-When the API is unreachable, the system relies strictly on its local search capabilities to give you the raw context directly from your documents. 
-
-The fallback answer respects your selected style:
-- **Concise:** Shows the single most relevant passage (the first 2-3 sentences only) and its page number.
-- **Medium:** Shows the top 2-3 relevant passages (around 5 sentences each) with their respective filenames and page numbers.
-- **Detailed:** Dumps **all** relevant text chunks found across your documents, fully untruncated, and neatly grouped by Document Name and Page Number.
-
-You will also see a warning note at the bottom of the answer: *"⚠️ Offline mode — Gemini API unavailable. Showing direct document extract."* Once your quota resets (usually at midnight), the system automatically resumes generating AI-synthesized answers.
+When the API quota runs out, rate-limited calls are retried briefly (at most `LLM_MAX_RETRY_WAIT_SECONDS`, 20 s by default), and then the extractive fallback answers with a note explaining why.
 
 ---
 
-##  Smart Follow-up Questions
+## API
 
-After every answer, the system generates **4 clickable suggestion chips** at the bottom of the chat bubble. 
-- **Online Mode:** Gemini AI analyzes the answer and predicts what you might want to ask next (e.g., asking for an example, a comparison, or advanced concepts).
-- **Offline Mode:** The system uses the internal metadata of the retrieved documents (like section headings) to suggest relevant follow-up questions.
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/api/upload` | Upload one or more files (multipart field `files`). Per-file status: `indexed`, `duplicate`, `replaced`, `error`. |
+| `GET` | `/api/documents` | List indexed documents |
+| `GET` | `/api/documents/{doc_id}` | A document's extracted text and chunks |
+| `DELETE` | `/api/documents/{doc_id}` | Remove a document |
+| `POST` | `/api/chat` | Ask a question, JSON response |
+| `POST` | `/api/chat/stream` | Ask a question, Server-Sent Events: `sources`, `token`, `done`, `error` |
+| `DELETE` | `/api/conversations/{id}` | Forget a conversation |
+| `GET` | `/api/status` | Active LLM / embeddings / reranker and any warnings |
 
-Clicking any of these chips will instantly send it as your next question!
+Chat request body:
+
+```json
+{ "question": "What was Q3 revenue?", "style": "concise | medium | long",
+  "document_ids": ["optional", "filter"], "conversation_id": "optional" }
+```
+
+Interactive docs are at `http://localhost:8000/docs`.
 
 ---
 
-##  Project Structure
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+The tests run fully offline (fake embedder and LLM) against a temporary data directory.
+
+---
+
+## Project structure
 
 ```text
-RAG/
-├── api_key_here
-├── jstRAG.exe
-├── jstRAG.spec
-├── requirements.txt
-├── run.py
-├── sample_report.txt
-├── test_rag.py
-├── app/
-│   ├── main.py
-│   ├── api/
-│   │   ├── chat.py
-│   │   ├── documents.py
-│   │   └── upload.py
-│   ├── core/
-│   │   ├── config.py
-│   │   └── schemas.py
-│   ├── generation/
-│   │   ├── answerer.py
-│   │   ├── citation.py
-│   │   ├── memory.py
-│   │   └── prompts.py
-│   ├── ingestion/
-│   │   ├── cleaner.py
-│   │   ├── docx.py
-│   │   ├── html.py
-│   │   ├── loader.py
-│   │   ├── ocr.py
-│   │   ├── pdf.py
-│   │   └── txt.py
-│   ├── retrieval/
-│   │   ├── chunker.py
-│   │   ├── embedder.py
-│   │   ├── query_rewriter.py
-│   │   ├── reranker.py
-│   │   ├── retriever.py
-│   │   └── vectorstore.py
-│   └── utils/
-│       ├── filetypes.py
-│       └── logging.py
-└── web/
-    ├── app.js
-    ├── index.html
-    └── style.css
+app/
+├── main.py                  # FastAPI app, static UI, background index build
+├── api/                     # upload, documents, chat (JSON + SSE), status
+├── core/                    # settings (.env), pydantic schemas
+├── ingestion/               # pdf, docx, html, txt/csv/json parsers, OCR, cleaning
+├── retrieval/
+│   ├── chunker.py           # structure-aware chunking
+│   ├── embedder.py          # Gemini / local sentence-transformers embeddings
+│   ├── keyword.py           # BM25 inverted index
+│   ├── vectorstore.py       # FAISS index + document registry, persistence
+│   ├── query_rewriter.py    # standalone question + query expansion
+│   ├── reranker.py          # RRF + cross-encoder / heuristic reranking
+│   └── retriever.py         # hybrid retrieval pipeline
+├── generation/
+│   ├── llm.py               # Gemini + OpenAI-compatible clients, retries
+│   ├── prompts.py           # system prompt, styles
+│   ├── answerer.py          # streaming RAG pipeline, extractive fallback
+│   ├── citation.py          # citation parsing, confidence
+│   └── memory.py            # bounded conversation memory
+└── utils/
+web/                         # UI (vendored marked + DOMPurify, works offline)
+tests/                       # pytest suite
 ```
+
+### Building a Windows executable
+
+`run.py` supports PyInstaller. Bundle the `web/` folder as data (for example, `--add-data "web;web"`) and place `.env` next to the executable.

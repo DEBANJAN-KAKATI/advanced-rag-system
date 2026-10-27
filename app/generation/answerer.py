@@ -1,304 +1,253 @@
-import uuid
-import time
-import re
 import json
-from typing import List, Dict, Any, Optional
-from collections import OrderedDict
+import re
+import uuid
+from typing import List, Dict, Any, Optional, Iterator, Tuple
 from app.core.config import settings
-from app.core.schemas import AnswerStyle, ChatResponse, Citation
-from app.retrieval.retriever import retrieve_relevant_chunks
+from app.core.schemas import AnswerStyle, ChatResponse
+from app.generation import llm as llm_module
+from app.generation.citation import (
+    build_citations, evaluate_confidence, is_not_found_answer, normalize_citation_markers, select_cited,
+)
+from app.generation.llm import LLMError
 from app.generation.memory import chat_memory
-from app.generation.prompts import SYSTEM_RAG_PROMPT_TEMPLATE, STYLE_INSTRUCTIONS, FOLLOWUP_QUESTIONS_PROMPT
-from app.generation.citation import build_citations, evaluate_confidence
+from app.generation.prompts import (
+    ANSWER_PROMPT_TEMPLATE, FOLLOWUP_INSTRUCTION, FOLLOWUP_MARKER, NOT_FOUND_SENTENCE, STYLE_INSTRUCTIONS, SYSTEM_PROMPT,
+)
+from app.retrieval.chunker import split_sentences
+from app.retrieval.keyword import term_coverage
+from app.retrieval.retriever import RetrievalResult, retrieve_relevant_chunks
+from app.retrieval.vectorstore import vector_store
 from app.utils.logging import logger
 
-try:
-    from google import genai
-    GENAI_AVAILABLE = True
-except ImportError:
-    GENAI_AVAILABLE = False
-
-# Maximum number of retries when rate-limited
-MAX_RETRIES = 3
-BASE_RETRY_DELAY = 5  # seconds
+Event = Tuple[str, Dict[str, Any]]
 
 
-def _parse_retry_delay(error_message: str) -> float:
-    """Extract the retry delay from a 429 error message, or return a default."""
-    match = re.search(r'retryDelay.*?(\d+(?:\.\d+)?)\s*s', str(error_message))
-    if match:
-        return min(float(match.group(1)) + 1, 60)  # cap at 60s, add 1s buffer
-    return BASE_RETRY_DELAY
-
-
-def _call_gemini_with_retry(client, model: str, contents: str) -> str:
-    """Call Gemini API with automatic retry on rate-limit (429) errors."""
-    last_error = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents
-            )
-            return response.text.strip()
-        except Exception as e:
-            last_error = e
-            error_str = str(e)
-            # Only retry on rate-limit (429) errors
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                if attempt < MAX_RETRIES:
-                    delay = _parse_retry_delay(error_str)
-                    logger.info(f"Rate limited (attempt {attempt+1}/{MAX_RETRIES+1}). Retrying in {delay:.1f}s...")
-                    time.sleep(delay)
-                    continue
-            # Non-retryable error — break immediately
-            logger.warning(f"GenAI generation failed: {e}.")
-            break
-    
-    logger.warning(f"GenAI generation failed after {MAX_RETRIES+1} attempts: {last_error}.")
-    return ""
-
-
-def _generate_followup_questions(client, question: str, answer_text: str) -> List[str]:
-    """Generate AI-powered follow-up question suggestions using Gemini."""
-    try:
-        # Truncate answer to first 500 chars to save tokens
-        answer_snippet = answer_text[:500]
-        prompt = FOLLOWUP_QUESTIONS_PROMPT.format(
-            question=question,
-            answer_snippet=answer_snippet
-        )
-        raw = _call_gemini_with_retry(client, settings.LLM_MODEL, prompt)
-        if not raw:
-            return []
-        # Clean markdown fences if present
-        text = raw.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            return [str(q).strip() for q in parsed if isinstance(q, str) and q.strip()][:4]
-    except Exception as e:
-        logger.warning(f"Follow-up question generation failed: {e}")
-    return []
+# ---------------------------------------------------------------------------- formatting
+def _page_label(chunk: Dict[str, Any]) -> str:
+    start, end = chunk.get("page"), chunk.get("page_end")
+    if start is None:
+        return ""
+    return f"p. {start}" if not end or end == start else f"pp. {start}-{end}"
 
 
 def format_context_passages(chunks: List[Dict[str, Any]]) -> str:
-    """Formats retrieved chunks into clear, cited text blocks for prompt context."""
-    if not chunks:
-        return "No documents available in context."
-        
+    """Numbered passages; the numbers are what the model cites as [n]."""
     passages = []
-    for idx, chunk in enumerate(chunks):
-        fn = chunk.get("filename", "Unknown")
-        pg = chunk.get("page", 1)
-        sec = chunk.get("section", "General")
-        txt = chunk.get("text", "")
-        passages.append(
-            f"[Source {idx+1}] File: {fn} | Page: {pg} | Section: {sec}\nContent:\n{txt}"
-        )
+    for idx, chunk in enumerate(chunks, start=1):
+        meta = [chunk.get("filename", "Unknown")]
+        if chunk.get("filename", "").lower().endswith(".pdf"):  # other formats have no real pages
+            meta.append(_page_label(chunk))
+        if chunk.get("section") and chunk["section"] != "General":
+            meta.append(f"section: {chunk['section']}")
+        passages.append(f"[{idx}] ({' | '.join(meta)})\n{chunk.get('text', '').strip()}")
     return "\n\n".join(passages)
 
 
-def _build_offline_fallback(question: str, chunks: List[Dict[str, Any]], style: AnswerStyle) -> str:
-    """
-    Build a comprehensive offline answer when the Gemini API is unavailable.
-    Respects the answer style mode:
-    - CONCISE: Show only the single most relevant passage, briefly
-    - MEDIUM: Show top 2-3 passages with page references
-    - LONG: Show ALL passages grouped by document & page, full text
-    """
-    grouped = OrderedDict()
-    for chunk in chunks:
-        fn = chunk.get("filename", "Unknown")
-        pg = chunk.get("page", 1)
-        sec = chunk.get("section", "General")
-        txt = chunk.get("text", "").strip()
-        key = (fn, pg)
-        if key not in grouped:
-            grouped[key] = {"filename": fn, "page": pg, "sections": [], "texts": []}
-        if sec and sec not in grouped[key]["sections"]:
-            grouped[key]["sections"].append(sec)
-        if txt:
-            grouped[key]["texts"].append(txt)
+class _MarkerSplitter:
+    """Streams answer text while holding back the follow-up marker and everything after it."""
 
-    parts = []
+    def __init__(self, marker: str):
+        self.marker = marker
+        self.buffer = ""
+        self.tail = ""
+        self.found = False
 
+    def feed(self, text: str) -> str:
+        if self.found:
+            self.tail += text
+            return ""
+        self.buffer += text
+        idx = self.buffer.find(self.marker)
+        if idx >= 0:
+            emit, self.tail, self.buffer, self.found = self.buffer[:idx], self.buffer[idx + len(self.marker):], "", True
+            return emit
+        keep = next((k for k in range(min(len(self.marker) - 1, len(self.buffer)), 0, -1)
+                     if self.buffer.endswith(self.marker[:k])), 0)
+        emit, self.buffer = self.buffer[:len(self.buffer) - keep], self.buffer[len(self.buffer) - keep:]
+        return emit
+
+    def flush(self) -> str:
+        emit, self.buffer = self.buffer, ""
+        return emit
+
+
+def _parse_followups(tail: str) -> List[str]:
+    match = re.search(r"\[.*\]", tail or "", re.DOTALL)
+    if not match:
+        return []
+    try:
+        items = json.loads(match.group(0))
+    except ValueError:
+        return []
+    return [q.strip() for q in items if isinstance(q, str) and q.strip()][:4] if isinstance(items, list) else []
+
+
+# ---------------------------------------------------------------------------- no-LLM fallback
+def build_extractive_answer(question: str, chunks: List[Dict[str, Any]], style: AnswerStyle, reason: str) -> str:
+    """
+    Answer assembled from the most relevant sentences of the retrieved passages, used when
+    no LLM is configured or the LLM call failed. Each sentence keeps its [n] source marker.
+    """
+    limit = {AnswerStyle.CONCISE: 2, AnswerStyle.MEDIUM: 5, AnswerStyle.LONG: 10}.get(style, 5)
+    candidates = []
+    for n, chunk in enumerate(chunks, start=1):
+        for pos, (sentence, _) in enumerate(split_sentences(chunk.get("text", ""))):
+            if len(sentence) < 25 or sentence.startswith("#"):
+                continue
+            score = term_coverage(question, sentence) + 0.15 / n
+            candidates.append((score, n, pos, sentence))
+    best = sorted(candidates, key=lambda x: x[0], reverse=True)[:limit]
+    best.sort(key=lambda x: (x[1], x[2]))  # restore reading order
+
+    note = (f"> **Extractive answer** - the AI model is unavailable ({reason}). "
+            f"Below are the most relevant sentences from your documents.\n\n")
+    if not best:
+        return note + NOT_FOUND_SENTENCE
     if style == AnswerStyle.CONCISE:
-        # Short & direct — only the top passage
-        parts.append("**Quick Answer from Documents:**\n")
-        top_chunk = chunks[0] if chunks else None
-        if top_chunk:
-            txt = top_chunk.get("text", "").strip()
-            # Take only the first 2-3 sentences
-            sentences = re.split(r'(?<=[.!?])\s+', txt)
-            short_text = " ".join(sentences[:3])
-            fn = top_chunk.get("filename", "Unknown")
-            pg = top_chunk.get("page", 1)
-            parts.append(f"{short_text}")
-            parts.append(f"\n*[Source: {fn}, Page {pg}]*")
-        parts.append("\n\n*⚠️ Offline mode — Gemini API unavailable. Showing direct document extract.*")
-
-    elif style == AnswerStyle.MEDIUM:
-        # Exam-style answer — top 2-3 passages, structured
-        parts.append(f"### {question}\n")
-        items = list(grouped.items())[:3]
-        for (fn, pg), data in items:
-            section_label = ", ".join(data["sections"]) if data["sections"] else "General"
-            combined_text = " ".join(data["texts"])
-            # Take first ~300 chars worth of content per passage
-            sentences = re.split(r'(?<=[.!?])\s+', combined_text)
-            medium_text = " ".join(sentences[:5])
-            parts.append(f"**{data['filename']}** (Page {data['page']}, {section_label}):")
-            parts.append(f"{medium_text}\n")
-
-        parts.append("\n*⚠️ Offline mode — Gemini API unavailable. Showing key document passages.*")
-
-    else:
-        # DETAILED — everything, grouped by page
-        parts.append(f"### Detailed Information from Your Documents\n")
-        parts.append(f"**Your Question:** *{question}*\n")
-        parts.append(f"Found **{len(chunks)} relevant passages** across **{len(grouped)} page(s)**. "
-                     f"Below is all the related content extracted from your documents:\n")
-        parts.append("---\n")
-
-        for (fn, pg), data in grouped.items():
-            section_label = ", ".join(data["sections"]) if data["sections"] else "General"
-            parts.append(f"#### 📄 {data['filename']} — Page {data['page']}")
-            parts.append(f"**Section:** {section_label}\n")
-            
-            # Output the FULL text of every chunk from this page (no truncation)
-            for text_block in data["texts"]:
-                parts.append(f"{text_block}\n")
-            
-            parts.append("---\n")
-
-        parts.append("*⚠️ Offline mode — This answer was compiled directly from your document passages because the "
-                     "Gemini API is temporarily unavailable (rate limit reached). "
-                     "The AI-synthesized answer will be available once the API quota resets.*")
-
-    return "\n".join(parts)
+        return note + " ".join(f"{s} [{n}]" for _, n, _, s in best)
+    return note + "\n".join(f"- {s} [{n}]" for _, n, _, s in best)
 
 
-def _generate_offline_followups(question: str, chunks: List[Dict[str, Any]]) -> List[str]:
-    """Generate basic follow-up question suggestions without AI, using chunk metadata."""
-    suggestions = []
-    topics_seen = set()
-    
+def _fallback_followups(chunks: List[Dict[str, Any]]) -> List[str]:
+    suggestions: List[str] = []
     for chunk in chunks:
-        fn = chunk.get("filename", "Unknown")
-        sec = chunk.get("section", "General")
-        txt = chunk.get("text", "")
-        
-        # Extract potential topic keywords from section names
-        if sec and sec != "General" and sec.lower() not in topics_seen:
-            topics_seen.add(sec.lower())
-            suggestions.append(f"Tell me more about {sec}")
-        
-    # Add generic follow-ups based on the question
-    if "what" in question.lower() or "define" in question.lower():
-        suggestions.append(f"Can you show an example of this?")
-        suggestions.append(f"What are the key formulas involved?")
-    elif "how" in question.lower():
-        suggestions.append(f"What are the advantages and disadvantages?")
-        suggestions.append(f"Show me a numerical example")
-    elif "explain" in question.lower():
-        suggestions.append(f"What are the types or classifications?")
-        suggestions.append(f"How is this calculated in practice?")
-    else:
-        suggestions.append(f"Explain this with an example")
-        suggestions.append(f"What are the key points to remember?")
-    
-    suggestions.append("Summarize the entire document")
-    
-    return suggestions[:4]
+        section = (chunk.get("section") or "").split(" > ")[-1]
+        if section and section != "General" and len(section) < 60:
+            suggestion = f"Tell me more about {section}"
+            if suggestion not in suggestions:
+                suggestions.append(suggestion)
+    filenames = list(dict.fromkeys(c.get("filename") for c in chunks if c.get("filename")))
+    if filenames:
+        suggestions.append(f"Summarize {filenames[0]}")
+    return suggestions[:3]
+
+
+# ---------------------------------------------------------------------------- pipeline
+def stream_answer(
+    question: str,
+    style: AnswerStyle = AnswerStyle.MEDIUM,
+    document_ids: Optional[List[str]] = None,
+    conversation_id: Optional[str] = None,
+) -> Iterator[Event]:
+    """
+    Full RAG pipeline as a stream of events:
+      ("sources", {...})  retrieved passages (numbered like the [n] markers), before generation
+      ("token", {"text"}) answer text as it is generated
+      ("done", ChatResponse dict) final answer, cited sources, confidence, follow-ups
+    """
+    question = question.strip()
+    conversation_id = conversation_id or uuid.uuid4().hex[:12]
+    history_text = chat_memory.format_history_for_prompt(conversation_id)
+    client = llm_module.llm
+
+    def finish(answer: str, retrieval: Optional[RetrievalResult], citations, llm_used: bool,
+               notice: Optional[str], followups: List[str]) -> Event:
+        scored = retrieval.chunks if retrieval else []
+        confidence = evaluate_confidence(answer, scored, retrieval.scorer if retrieval else "heuristic",
+                                         retrieval.low_relevance if retrieval else False,
+                                         retrieval.mode if retrieval else "hybrid")
+        chat_memory.add_turn(conversation_id, question, answer)
+        response = ChatResponse(
+            answer=answer,
+            style=style,
+            citations=citations,
+            confidence=confidence,
+            query_expansions=retrieval.queries if retrieval else [question],
+            standalone_question=retrieval.standalone_question if retrieval else question,
+            conversation_id=conversation_id,
+            sources_used=[{"doc_id": c.doc_id, "filename": c.filename, "page": c.page, "section": c.section}
+                          for c in citations],
+            suggested_questions=followups,
+            llm_used=llm_used,
+            notice=notice,
+            retrieval_mode=retrieval.mode if retrieval else "none",
+        )
+        return "done", response.model_dump(mode="json")
+
+    # 1. Nothing to search
+    available = vector_store.get_documents()
+    if document_ids:
+        available = [d for d in available if d["doc_id"] in set(document_ids)]
+    if not available:
+        msg = ("No documents are uploaded yet. Upload a PDF, Word, HTML or text file and ask again."
+               if not vector_store.get_documents() else "None of the selected documents exist anymore. Please reselect.")
+        yield "token", {"text": msg}
+        yield finish(msg, None, [], False, None, [])
+        return
+
+    # 2. Retrieve
+    retrieval = retrieve_relevant_chunks(question, style=style, doc_filter=document_ids, chat_history=history_text)
+    chunks = [c for c, _ in retrieval.chunks]
+    all_citations = build_citations(retrieval.chunks)
+    yield "sources", {
+        "conversation_id": conversation_id,
+        "standalone_question": retrieval.standalone_question,
+        "query_expansions": retrieval.queries,
+        "citations": [c.model_dump(mode="json") for c in all_citations],
+    }
+    notice = " ".join(retrieval.notices) or None
+
+    if not chunks:
+        yield "token", {"text": NOT_FOUND_SENTENCE}
+        yield finish(NOT_FOUND_SENTENCE, retrieval, [], False, notice, [])
+        return
+
+    # 3. Generate
+    if client is None:
+        answer = build_extractive_answer(retrieval.standalone_question, chunks, style, "no LLM is configured")
+        yield "token", {"text": answer}
+        yield finish(answer, retrieval, select_cited(all_citations, answer), False,
+                     notice, _fallback_followups(chunks))
+        return
+
+    prompt = ANSWER_PROMPT_TEMPLATE.format(
+        chat_history=history_text,
+        context_passages=format_context_passages(chunks),
+        style_instruction=STYLE_INSTRUCTIONS.get(style, STYLE_INSTRUCTIONS[AnswerStyle.MEDIUM]),
+        question=retrieval.standalone_question if retrieval.standalone_question != question and history_text else question,
+        followup_instruction=FOLLOWUP_INSTRUCTION if settings.SUGGEST_FOLLOWUPS else "",
+    )
+    if retrieval.mode == "summary":
+        prompt += "\n\nThe sources are excerpts spread across the whole document(s); summarize them as a whole."
+
+    splitter = _MarkerSplitter(FOLLOWUP_MARKER)
+    streamed: List[str] = []
+    try:
+        for piece in client.stream(SYSTEM_PROMPT, prompt):
+            emit = splitter.feed(piece)
+            if emit:
+                streamed.append(emit)
+                yield "token", {"text": emit}
+        rest = splitter.flush()
+        if rest:
+            streamed.append(rest)
+            yield "token", {"text": rest}
+    except LLMError as e:
+        logger.warning(f"LLM generation failed: {e}")
+        if not "".join(streamed).strip():
+            answer = build_extractive_answer(retrieval.standalone_question, chunks, style, str(e))
+            yield "token", {"text": answer}
+            yield finish(answer, retrieval, select_cited(all_citations, answer), False,
+                         notice, _fallback_followups(chunks))
+            return
+        streamed.append(f"\n\n*(The answer was cut off: {e}.)*")
+
+    answer = normalize_citation_markers("".join(streamed).strip(), len(chunks))
+    if not answer:
+        answer = NOT_FOUND_SENTENCE
+    followups = _parse_followups(splitter.tail) or ([] if is_not_found_answer(answer) else _fallback_followups(chunks))
+    yield finish(answer, retrieval, select_cited(all_citations, answer), True, notice, followups)
 
 
 def generate_answer(
     question: str,
     style: AnswerStyle = AnswerStyle.MEDIUM,
     document_ids: Optional[List[str]] = None,
-    conversation_id: Optional[str] = None
+    conversation_id: Optional[str] = None,
 ) -> ChatResponse:
-    """
-    Executes complete RAG answer generation pipeline.
-    """
-    if not conversation_id:
-        conversation_id = str(uuid.uuid4())[:8]
-
-    # 1. Retrieve chunks
-    scored_chunks, query_expansions = retrieve_relevant_chunks(
-        question=question,
-        top_k=settings.RERANK_TOP_K,
-        doc_filter=document_ids
-    )
-
-    chunks = [c for c, _ in scored_chunks]
-    context_text = format_context_passages(chunks)
-
-    # 2. Format memory & prompt
-    history_text = chat_memory.format_history_for_prompt(conversation_id)
-    style_instruction = STYLE_INSTRUCTIONS.get(style, STYLE_INSTRUCTIONS[AnswerStyle.MEDIUM])
-
-    full_prompt = SYSTEM_RAG_PROMPT_TEMPLATE.format(
-        style_instruction=style_instruction,
-        chat_history=history_text,
-        context_passages=context_text,
-        question=question
-    )
-
-    # 3. Call Gemini LLM with retry
-    answer_text = ""
-    gemini_available = False
-    client = None
-    if settings.GEMINI_API_KEY and settings.GEMINI_API_KEY != "your_api_key":
-        if GENAI_AVAILABLE:
-            client = genai.Client(api_key=settings.GEMINI_API_KEY)
-            answer_text = _call_gemini_with_retry(client, settings.LLM_MODEL, full_prompt)
-            if answer_text:
-                gemini_available = True
-
-    if not answer_text:
-        # Offline fallback: style-aware document compilation
-        if chunks:
-            answer_text = _build_offline_fallback(question, chunks, style)
-        else:
-            answer_text = "Based on the uploaded documents, there is insufficient evidence to answer this question."
-
-    # 4. Generate follow-up questions
-    suggested_questions = []
-    if gemini_available and client:
-        suggested_questions = _generate_followup_questions(client, question, answer_text)
-    
-    # If Gemini failed or returned nothing, use offline follow-ups
-    if not suggested_questions and chunks:
-        suggested_questions = _generate_offline_followups(question, chunks)
-
-    # 5. Build Citations & Evaluate Confidence
-    citations = build_citations(scored_chunks)
-    confidence = evaluate_confidence(answer_text, scored_chunks)
-
-    # 6. Record to memory
-    chat_memory.add_turn(conversation_id, question, answer_text)
-
-    sources_used = [
-        {
-            "doc_id": c.get("doc_id"),
-            "filename": c.get("filename"),
-            "page": c.get("page"),
-            "section": c.get("section")
-        } for c in chunks
-    ]
-
-    return ChatResponse(
-        answer=answer_text,
-        style=style,
-        citations=citations,
-        confidence=confidence,
-        query_expansions=query_expansions,
-        conversation_id=conversation_id,
-        sources_used=sources_used,
-        suggested_questions=suggested_questions
-    )
+    """Non-streaming wrapper around `stream_answer`."""
+    final = None
+    for event, data in stream_answer(question, style, document_ids, conversation_id):
+        if event == "done":
+            final = data
+    return ChatResponse(**final)

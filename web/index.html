@@ -8,7 +8,9 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
-  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <!-- Vendored so the app works offline: marked 12.0.2, DOMPurify 3.1.6 -->
+  <script src="vendor/marked.min.js"></script>
+  <script src="vendor/purify.min.js"></script>
 </head>
 <body>
   <div class="app-container">
@@ -17,33 +19,35 @@
       <div class="sidebar-header">
         <div class="logo-text">
           <h2>jstRAG</h2>
-          <span>Gemini 2.5 • Hybrid Retrieval</span>
+          <span id="engine-label">Hybrid retrieval • Cited answers</span>
         </div>
       </div>
 
       <!-- Upload Zone -->
       <div class="upload-section">
         <div class="dropzone" id="dropzone">
-          <input type="file" id="file-input" multiple accept=".pdf,.docx,.doc,.html,.txt,.md,.csv,.json">
+          <input type="file" id="file-input" multiple accept=".pdf,.docx,.html,.htm,.txt,.md,.markdown,.rst,.log,.csv,.json,.py">
           <div class="dropzone-content">
             <div class="upload-icon">Upload</div>
             <p class="drop-title">Drop documents here</p>
-            <p class="drop-subtitle">PDF, DOCX, HTML, TXT, MD</p>
-            <button class="btn btn-sm btn-accent" onclick="document.getElementById('file-input').click()">Browse Files</button>
+            <p class="drop-subtitle" id="drop-subtitle">PDF, DOCX, HTML, TXT, MD, CSV, JSON</p>
+            <button class="btn btn-sm btn-accent" id="browse-btn" type="button">Browse Files</button>
           </div>
         </div>
         <div id="upload-status" class="upload-status hidden">
           <div class="spinner"></div>
           <span id="upload-status-text">Processing documents...</span>
         </div>
+        <ul id="upload-results" class="upload-results"></ul>
       </div>
 
       <!-- Document Inventory -->
       <div class="doc-inventory">
         <div class="section-title">
           <span>Knowledge Base (<span id="doc-count">0</span>)</span>
-          <button class="btn-icon" onclick="loadDocuments()" title="Refresh">Refresh</button>
+          <button class="btn-icon" id="refresh-docs" type="button" title="Refresh">Refresh</button>
         </div>
+        <div class="scope-hint" id="scope-hint">Tick documents to limit questions to them.</div>
         <div id="doc-list" class="doc-list">
           <div class="empty-docs">No documents uploaded yet. Upload a document to start asking questions.</div>
         </div>
@@ -52,35 +56,35 @@
 
     <!-- Main Chat Workspace -->
     <main class="workspace">
-      <!-- Workspace Header -->
       <header class="top-bar">
         <div class="top-bar-left">
           <h1>Document Assistant</h1>
           <span class="badge badge-active" id="active-doc-badge">All Documents</span>
+          <button class="btn btn-sm btn-ghost" id="new-chat-btn" type="button" title="Start a new conversation">New chat</button>
         </div>
 
-        <!-- Answer Length Style Selector -->
         <div class="style-selector-container">
           <span class="style-label">Answer Style:</span>
-          <div class="style-toggle-group">
-            <button class="style-btn" data-style="concise">Concise</button>
-            <button class="style-btn active" data-style="medium">Medium</button>
-            <button class="style-btn" data-style="long">Detailed</button>
+          <div class="style-toggle-group" role="radiogroup" aria-label="Answer style">
+            <button class="style-btn" data-style="concise" type="button">Concise</button>
+            <button class="style-btn active" data-style="medium" type="button">Medium</button>
+            <button class="style-btn" data-style="long" type="button">Detailed</button>
           </div>
         </div>
       </header>
 
+      <div id="status-banner" class="status-banner hidden"></div>
+
       <!-- Chat Feed -->
       <div class="chat-container" id="chat-container">
-        <!-- Welcome Card -->
         <div class="welcome-card">
-          <h2>Enterprise AI Knowledge Engine</h2>
-          <p>Upload your PDF reports, Word docs, HTML files, or raw notes. jstRAG will parse, clean, chunk, embed, and answer your questions with precise citations.</p>
+          <h2>Ask your documents anything</h2>
+          <p>Upload PDF reports, Word docs, HTML pages, or notes. jstRAG parses, chunks and indexes them, then answers your questions with numbered citations you can click to see the exact source passage.</p>
           <div class="feature-pills">
             <span class="pill">Hybrid BM25 + Vector</span>
-            <span class="pill">Cross-Encoder Reranking</span>
-            <span class="pill">Page & Section Citations</span>
-            <span class="pill">Confidence Scoring</span>
+            <span class="pill">Reranking</span>
+            <span class="pill">Clickable citations</span>
+            <span class="pill">Follow-up aware</span>
           </div>
         </div>
       </div>
@@ -88,30 +92,28 @@
       <!-- Chat Input Dock -->
       <div class="input-dock">
         <div class="input-container">
-          <textarea id="chat-input" placeholder="Ask anything about your documents..." rows="1"></textarea>
-          <button id="send-btn" class="send-btn" title="Send Question">
-            <span>Send</span>
+          <textarea id="chat-input" placeholder="Ask anything about your documents... (Shift+Enter for a new line)" rows="1"></textarea>
+          <button id="send-btn" class="send-btn" type="button" title="Send question">
+            <span id="send-label">Send</span>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"/></svg>
           </button>
         </div>
         <div class="dock-footer">
-          <span>Powered by Gemini 2.5 Flash • Context Grounded • Zero Hallucination Policy</span>
+          <span id="engine-footer">Answers are grounded in your documents and cite their sources.</span>
         </div>
       </div>
     </main>
   </div>
 
   <!-- Citation / Source Side Drawer -->
-  <div id="source-drawer" class="drawer hidden">
+  <div id="source-drawer" class="drawer hidden" role="dialog" aria-label="Source passage">
     <div class="drawer-header">
-      <h3>Source Inspection</h3>
-      <button class="btn-icon" onclick="closeSourceDrawer()">✕</button>
+      <h3>Source Passage</h3>
+      <button class="btn-icon" id="close-drawer" type="button" title="Close">✕</button>
     </div>
-    <div id="drawer-body" class="drawer-body">
-      <!-- Dynamic source snippet details -->
-    </div>
+    <div id="drawer-body" class="drawer-body"></div>
   </div>
-  <div id="drawer-overlay" class="drawer-overlay hidden" onclick="closeSourceDrawer()"></div>
+  <div id="drawer-overlay" class="drawer-overlay hidden"></div>
 
   <script src="app.js"></script>
 </body>

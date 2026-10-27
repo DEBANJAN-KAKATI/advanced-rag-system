@@ -1,48 +1,52 @@
 import json
-from typing import List
+import re
+from typing import List, Tuple
 from app.core.config import settings
+from app.generation.llm import LLMError, llm
+from app.generation.prompts import QUERY_REWRITE_PROMPT, QUERY_REWRITE_SYSTEM
 from app.utils.logging import logger
 
-try:
-    from google import genai
-    GENAI_AVAILABLE = True
-except ImportError:
-    GENAI_AVAILABLE = False
 
-def rewrite_query(query: str) -> List[str]:
+def _parse_json_object(text: str) -> dict:
+    text = text.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    match = re.search(r"\{.*\}", text, re.DOTALL)
+    return json.loads(match.group(0) if match else text)
+
+
+def rewrite_query(question: str, chat_history: str = "") -> Tuple[str, List[str]]:
     """
-    Generates 2-3 query variations/paraphrases to improve recall in hybrid search.
-    Returns original query + expanded queries.
+    Returns (standalone_question, search_queries).
+
+    With conversation history, follow-ups like "what about Q4?" are rewritten into
+    self-contained questions before searching. Alternative phrasings are added when
+    QUERY_REWRITE is enabled. Without an LLM, the question is used as-is.
     """
-    queries = [query]
-    if not settings.GEMINI_API_KEY or not GENAI_AVAILABLE:
-        return queries
+    question = question.strip()
+    if llm is None or not (settings.QUERY_REWRITE or chat_history):
+        return question, [question]
 
     try:
-        client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        prompt = f"""You are a search query expansion assistant for a Document RAG system.
-Given the user question below, generate 2 alternate search queries or sub-queries that express the same intent or highlight key concepts.
-
-Question: "{query}"
-
-Output ONLY a JSON array of strings, e.g. ["query 1", "query 2"]. Do not add markdown backticks or commentary."""
-
-        response = client.models.generate_content(
-            model=settings.LLM_MODEL,
-            contents=prompt,
+        raw = llm.generate(
+            QUERY_REWRITE_SYSTEM,
+            QUERY_REWRITE_PROMPT.format(chat_history=chat_history, question=question),
+            json_mode=True,
+            fast=True,
         )
-        text = response.text.strip()
-        if text.startswith("```"):
-            text = text.split("```")[1].strip()
-            if text.startswith("json"):
-                text = text[4:].strip()
-                
-        parsed = json.loads(text)
-        if isinstance(parsed, list):
-            for q in parsed:
-                if isinstance(q, str) and q.strip() and q.strip() not in queries:
-                    queries.append(q.strip())
-    except Exception as e:
-        logger.warning(f"Query rewriter encountered issue: {e}. Using original query.")
+        parsed = _parse_json_object(raw)
+    except (LLMError, ValueError, TypeError) as e:
+        logger.warning(f"Query rewriting skipped: {e}")
+        return question, [question]
 
-    return queries[:3]
+    standalone = parsed.get("standalone") if isinstance(parsed, dict) else None
+    standalone = standalone.strip() if isinstance(standalone, str) and standalone.strip() else question
+
+    queries = [standalone]
+    if question.lower() != standalone.lower():
+        queries.append(question)
+    if settings.QUERY_REWRITE and isinstance(parsed, dict):
+        for q in parsed.get("queries") or []:
+            if isinstance(q, str) and q.strip() and q.strip().lower() not in {x.lower() for x in queries}:
+                queries.append(q.strip())
+    return standalone, queries[:4]
