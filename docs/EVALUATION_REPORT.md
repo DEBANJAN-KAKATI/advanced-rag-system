@@ -1,11 +1,47 @@
 # Chunking and reranking: evaluation report
 
-> [!NOTE]
-> The numbers below were measured on the pipeline as it was before the retrieval refactor
-> (merged together with this harness). Since then the default chunk size is ~300 tokens
-> (`CHUNK_SIZE=1200` characters, in line with recommendation 1), BM25 has its own cached
-> index, and reranker fallbacks are reported. A re-run on the current pipeline is in
-> progress and will be added to this report.
+## Re-run on the current pipeline (October 2026)
+
+The original study below measured the pipeline as it was before the retrieval refactor. This section re-runs the same harness, dataset, and offline setup on the current code. Raw results: [`evaluation/results/full-offline-refactor/summary.md`](../evaluation/results/full-offline-refactor/summary.md) (commit `47bcba1`). The baseline for p-values is now the current default: `structure-300` (`CHUNK_SIZE=1200`, `CHUNK_OVERLAP=200` characters) with hybrid RRF.
+
+**Default pipeline, before vs after** (hybrid RRF, no reranker; paired bootstrap over the same 75 answerable questions):
+
+| metric | before (`structure-500`, old chunker) | after (`structure-300`, current) | p |
+|---|---|---|---|
+| hit@1 | 0.467 | 0.600 | 0.067 |
+| recall@5 | 0.833 | 0.873 | 0.41 |
+| MRR | 0.608 | **0.741** | **0.004** |
+| nDCG@10 | 0.661 | **0.774** | **0.003** |
+| recall within 1,000 tokens | 0.560 | **0.853** | **< 0.001** |
+| answer prompt tokens | 2,838 | **1,739** (−39%) | |
+
+1. **Ranking is significantly better.** The right passage now comes first far more often. That matters more than recall@5 here, because the evidence was already somewhere in the top 5 for most questions (recall@5 differs within noise).
+2. **The chunker improved, not just the chunk size.** At the same nominal size (`structure-500`), recall@5 rose from 0.833 to 0.880 and MRR from 0.608 to 0.675. The new chunker splits oversized paragraphs at sentence boundaries and starts a chunk at each section heading. Chunks are therefore smaller on average (296 vs 456 tokens), and 58% of them exceed MiniLM's 256-wordpiece window instead of 99.6%. Dense-only recall@5 at that size rose from 0.687 to 0.773.
+3. **250 vs 300 tokens is within noise** (MRR 0.771 vs 0.741, p = 0.25). The default stays at 300 tokens, which gives slightly larger passages for the LLM to answer from.
+4. **No cheap reranker beats plain hybrid RRF on ~300-token chunks.**
+   - Keyword overlap: MRR 0.719 (p = 0.54).
+   - MMR: MRR 0.686 (p = 0.087).
+   - Sentence max-sim: MRR 0.678 (p = 0.17), at 1.0 s per query.
+
+   This matches the original finding that reranker gains shrink as chunks get smaller. The cross-encoder is still unmeasured (see below). When it is configured but unavailable, the app now falls back to keyword reranking and reports this in `/api/status` and in each response's `usage`, instead of silently.
+5. **Cost and calls per question.** Priced at `gemini-2.5-flash` ($0.30 / $2.50 per M input/output tokens; `gemini-2.0-flash`, used in the original study, is deprecated):
+   - The answer call costs about $1.15 per 1,000 queries, vs $1.33 with `structure-500` chunks.
+   - The full pipeline costs about $1.50 per 1,000 queries. It now makes two LLM calls per question instead of three: follow-up suggestions are generated in the same call as the answer.
+
+   These figures are not comparable with the original's $0.39, which used cheaper `gemini-2.0-flash` prices.
+6. **Offline (no-LLM) answers.**
+   - **Faithful:** faithfulness is 0.997.
+   - **Still never abstain:** 0 of 6 unanswerable questions were declined.
+   - **Shorter:** they cover about 36% of the reference answer's key terms. The extractive answer now shows the 5 most relevant sentences with citations instead of whole passages.
+
+   A lexical evidence threshold was tested as an abstention rule and rejected. Catching 3 of the 6 unanswerable questions would also refuse 9 of 75 answerable ones, and catching 5 of 6 would refuse 39 of 75. Reliable abstention needs the LLM (which is instructed to decline) or the cross-encoder's relevance threshold.
+
+**Still not measured**, for the same reasons as the original study (no Gemini key, no Hugging Face access): the cross-encoder, query rewriting, and LLM-written answers. With both available, run:
+`python -m evaluation.run --chunking structure-300 --retrieval hybrid-rrf hybrid+cross-encoder hybrid+rewrite+cross-encoder --generate --judge llm --calibrate-judge llm`
+
+---
+
+## Original study (pre-refactor pipeline)
 
 **TL;DR**
 
@@ -21,7 +57,7 @@
 
 Raw results: [`evaluation/results/full-offline/summary.md`](../evaluation/results/full-offline/summary.md). Reproduce them with `python -m evaluation.run --suite full --generate --calibrate-judge lexical`.
 
-## Setup
+### Setup
 
 | | |
 |---|---|
@@ -40,7 +76,7 @@ Raw results: [`evaluation/results/full-offline/summary.md`](../evaluation/result
 
 The harness supports all of these (`--retrieval hybrid+rewrite+cross-encoder --generate --judge llm`), and running them is the obvious next step.
 
-## Chunking
+### Chunking
 
 Retrieval was held fixed at hybrid (dense + BM25, RRF fusion, no reranker).
 
@@ -67,7 +103,7 @@ Retrieval was held fixed at hybrid (dense + BM25, RRF fusion, no reranker).
    - It is the only strategy that split an evidence span past recovery (maximum achievable recall 0.987).
 5. **Chunks that overflow the embedder's window are partly invisible.** 99.6% of the default chunks exceed MiniLM's 256-wordpiece window, so the embedder never sees their tails. Dense-only recall drops steadily with chunk size: 0.820 (fixed-250), 0.687 (structure-500), 0.613 (structure-1000). Gemini embeddings accept 2,048 tokens, so this mainly hurts the offline fallback, but nothing warned about it until it was measured.
 
-## Retrieval and reranking
+### Retrieval and reranking
 
 Chunking was held fixed at `structure-500`, the app default.
 
@@ -87,7 +123,7 @@ Chunking was held fixed at `structure-500`, the app default.
 4. **MMR reduces redundancy, but redundancy wasn't the problem here.** Redundant overlapping chunks weren't what kept answers out of the top 5. And MMR reorders using the dense similarity alone, so it throws away the BM25 signal and falls back to dense-only quality.
 5. **The cross-encoder fell back silently.** In the app, `RERANK_STRATEGY=cross-encoder` silently became keyword overlap when the model couldn't be downloaded. The trace now records `rerank_strategy_used`, and the harness refuses to report a cross-encoder number that was really keyword overlap.
 
-## Speed and cost per query
+### Speed and cost per query
 
 - **Retrieval is cheap.** p50 is 3–8 ms for every strategy except sentence max-sim. Every chat response now includes a `usage` object with per-stage milliseconds, token counts, and dollar cost.
 - **BM25 was being rebuilt on every query.** The index was rebuilt from scratch for each question: 22–25 ms per query at 52k words, growing linearly with corpus size. Caching it (`reranker._get_bm25`) cuts this to about 1 ms with identical results; this is covered by a test.
@@ -99,7 +135,7 @@ Chunking was held fixed at `structure-500`, the app default.
   Chunk size is the biggest cost lever after model choice: answer cost runs from $0.27 (250-token chunks) to $0.63 (1,000-token chunks) per 1,000 queries. Indexing the whole corpus costs about $0.02 regardless of strategy. Prices are in `app/core/pricing.py`; check them before quoting.
 - **Live latency will be dominated by LLM calls.** The default pipeline makes three sequential Gemini calls per question (rewrite, answer, follow-ups). Retrieval is not the place to optimise. Dropping the follow-up call, or making it asynchronous, removes a full LLM round trip.
 
-## Faithfulness: do answers stick to the source?
+### Faithfulness: do answers stick to the source?
 
 **Calibrating the judge.** Before trusting a faithfulness score, the harness runs the judge on answers whose faithfulness is already known:
 
@@ -115,7 +151,7 @@ The offline lexical judge catches most copied-in and altered claims. But it rate
 - **Often unhelpful.** It covers only 38–55% of the reference answer's key terms. In "medium" mode it shows the first sentences of the top document, which for single-page files is often the document header.
 - **Never abstains.** It declined 0 of 6 unanswerable questions: it always shows passages even when they don't answer the question. These are worth fixing before relying on offline mode.
 
-## Recommendations
+### Recommendations
 
 1. **Set `CHUNK_SIZE=250` and `CHUNK_OVERLAP=50`** (structure-aware). Recall@5 is the same, with 44% more recall at a 1,000-token budget, 31% lower answer cost, and the chunks fit the local embedder. This report doesn't change the default; that is a product decision, and it should be confirmed with Gemini embeddings first.
 2. **Keep hybrid RRF with overlap.** Drop MMR; skip semantic chunking.
@@ -125,7 +161,7 @@ The offline lexical judge catches most copied-in and altered claims. But it rate
    `python -m evaluation.run --chunking structure-250 structure-500 --retrieval hybrid+keyword hybrid+rewrite+cross-encoder --generate --judge llm --calibrate-judge llm`
    This measures real faithfulness, correctness, abstention, tokens and latency.
 
-## Limitations
+### Limitations
 
 - 75 answerable questions give CIs of about ±0.08, so small differences are noise. The p-values are what separate signal from noise.
 - One corpus domain: technical, English, mostly single-page text files.
